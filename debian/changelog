@@ -1,0 +1,464 @@
+snapd (1.9) xenial; urgency=medium
+
+  * rename source and binary package to "snapd"
+  * update directory layout to final 16.04 layout
+  * use `snap` command instead of the previous `snappy`
+  * use `interface` based security
+  * use new state engine for install/update/remove
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 12 Apr 2016 01:05:09 +0200
+
+ubuntu-snappy (1.7.3+20160310ubuntu1) xenial; urgency=medium
+
+    - debian: update versionized ubuntu-core-launcher dependency
+    - debian: tweak desktop file dir, ship Xsession.d snip for seamless
+      integration
+    - snappy: fix hw-assign to work with per-app udev tags
+    - snappy: use $snap.$app as per-app udev tag
+    - snap,snappy,systemd: %s/\<SNAP_ORIGIN\>/SNAP_DEVELOPER/g
+    - snappy: add mksquashfs --no-xattrs parameter
+    - snap,snappy,systemd: kill SNAP_FULLNAME
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 10 Mar 2016 09:26:20 +0100
+
+ubuntu-snappy (1.7.3+20160308ubuntu1) xenial; urgency=medium
+
+    - snappy,snap: move icon under meta/gui/
+    - debian: add snap.8 manpage
+    - debian: move snapd to /usr/lib/snappy/snapd
+    - snap,snappy,systemd: remove TMPDIR, TEMPDIR, SNAP_APP_TMPDIR
+    - snappy,dirs: add support to use desktop files from inside snaps
+    - daemon: snapd API events endpoint redux
+    - interfaces/builtin: add "network" interface
+    - overlord/state: do small fixes (typo, id clashes paranoia)
+    - overlord: add first pass of the logic in StateEngine itself
+    - overlord/state: introduce Status/SetStatus on Change
+    - interfaces: support permanent security snippets
+    - overlord/state: introduce Status/SetStatus and
+      Progress/SetProgress on Task
+    - overlord/state: introduce Task and Change.NewTask
+    - many: selectively swap semantics of plugs and slots
+    - client,cmd/snap: remove useless indirection in Interfaces
+    - interfaces: maintain Plug and Slot connection details
+    - client,daemon,cmd/snap: change POST /2.0/interfaces to work with
+      lists
+    - overlord/state: introduce Change and NewChange on state to create
+      them
+    - snappy: bugfix for snap.yaml parsing to be more consistent with
+      the spec
+    - snappy,systemd: remove "ports" from snap.yaml
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 08 Mar 2016 11:24:09 +0100
+
+ubuntu-snappy (1.7.3+20160303ubuntu4) xenial; urgency=medium
+
+  * rename:
+    debian/golang-snappy-dev.install ->
+       debian/golang-github-ubuntu-core-snappy-dev.install:
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 03 Mar 2016 12:29:16 +0100
+
+ubuntu-snappy (1.7.3+20160303ubuntu3) xenial; urgency=medium
+
+  * really fix typo in dependency name
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 03 Mar 2016 12:21:39 +0100
+
+ubuntu-snappy (1.7.3+20160303ubuntu2) xenial; urgency=medium
+
+  * fix typo in dependency name
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 03 Mar 2016 12:05:36 +0100
+
+ubuntu-snappy (1.7.3+20160303ubuntu1) xenial; urgency=medium
+
+    - debian: update build-depends for MIR
+    - many: implement new REST API: GET /2.0/interfaces
+    - integration-tests: properly stop snapd from branch
+    - cmd/snap: update tests for go-flags changes
+    - overlord/state: implement Lock/Unlock with implicit checkpointing
+    - overlord: split out the managers and State to their own
+      subpackages of overlord
+    - snappy: rename "migration-skill" to "old-security" and use new
+      interface names instead of skills
+    - client,cmd/snap: clarify name ambiguity in Plug or Slot
+    - overlord: start working on state engine along spec v2, have the
+      main skeleton follow that
+    - classic, oauth: update tests for change in MakeRandomString()
+    - client,cmd/snap: s/add/install/:-(
+    - interfaces,daemon: specialize Name to either Plug or Slot
+    - interfaces,interfaces/types: unify security snippet functions
+    - snapd: close the listener on Stop, to force the http.Serve loop to
+      exit
+    - snappy,daemon,snap/lightweight,cmd/snappy,docs/rest.md: expose
+      explicit channel selection to rest api
+    - interfaces,daemon: rename package holding built-in interfaces
+    - integration-tests: add the first classic dimention tests
+    - client,deaemon,docs: rename skills to interfaces on the wire
+    - asserts: add identity assertion type
+    - integration-tests: add the no_proxy env var
+    - debian: update build-depends for new package names
+    - oauth: fix oauth & quoting in the oauth_signature
+    - integration-tests: remove unused field
+    - integration-tests: add the http proxy argument
+    - interfaces,interfaces/types,deamon: mass internal rename to
+      interfaces
+    - client,cmd/snap: rename skills to interfaces (part 2)
+    - arch: fix missing mapping for powerpc
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 03 Mar 2016 11:00:19 +0100
+
+ubuntu-snappy (1.7.3+20160225ubuntu1) xenial; urgency=medium
+
+    - integration-tests: always use the built snapd when compiling
+      binaries from branch
+    - cmd/snap: rename skills to interfaces
+    - testutil,skills/types,skills,daemon: tweak discovery of know skill
+      types
+    - docs: add docs for arm64 cross building
+    - overlord: implement basic ReadState/WriteState
+    - overlord: implement Get/Set/Copy on State
+    - integration-tests: fix dd output check
+    - integration-tests: add fromBranch config field
+    - integration-tests: use cli pkg methods in hwAssignSuite
+    - debian: do not create the snappypkg user, we don't need it anymore
+    - arch: fix build failure on s390x
+    - classic: cleanup downloaded lxd tarball
+    - cmd/snap,client,integration-tests: rename snap subcmds
+      'assert'=>'ack', 'asserts'=>'known'
+    - skills: fix broken tests builds
+    - skills,skills/types: pass slot to SlotSecuritySnippet()
+    - skills/types: teach bool-file about udev security
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 25 Feb 2016 16:17:19 +0100
+
+ubuntu-snappy (1.7.2+20160223ubuntu1) xenial; urgency=medium
+
+  * New git snapshot:
+    - asserts: introduce snap-declaration
+    - cmd/snap: fix integration tests for the "cmd_asserts"
+    - integration-tests: fix fanctl output check
+    - cmd/snap: fix test failure after merging 23a64e6
+    - cmd/snap: replace skip-help with empty description
+    - docs: update security.md to match current migration-skill
+      semantics
+    - snappy: treat commands with 'daemon' field as services
+    - asserts: use more consistent names for receivers in
+      snap_asserts*.go
+    - debian: add missing golang-websocket-dev build-dependency
+    - classic: if classic fails to get created, undo the bind mounts
+    - snappy: never return nil in NewLocalSnapRepository()
+    - notifications: A simple notification system
+    - snappy: when using staging, authenticate there instead
+    - integration-tests/snapd: fix the start of the test snapd socket
+    - skills/types: use CamelCase for security names
+    - skills: add support for implicit revoke
+    - skills: add security layer
+    - integration-tests: use exec.Command wrapper for updates
+    - cmd/snap: add 'snap skills'
+    - cms/snap: add 'snap revoke'
+    - docs: add docs for skills API
+    - cmd/snap: add 'snap grant'
+    - cmd/snappy, coreconfig, daemon, snappy: move config to always be
+      bytes (in and out)
+    - overlord: start with a skeleton and stubs for Overlord,
+      StateEngine, StateJournal and managers
+    - integration-tests: skip tests affected by LP: #1544507
+    - skills/types: add bool-file
+    - po: refresh translation templates
+    - cmd/snap: add 'snap experimental remove-skill-slot'
+    - asserts: introduce device assertion
+    - cmd/snap: implemented add, remove, purge, refresh, rollback,
+      activate, deactivate
+    - cmd/snap: add 'snap experimental add-skill-slot'
+    - cmd/snap: add 'snap experimental remove-skill'
+    - cmd/snap: add tests for common skills code
+    - cmd/snap: add 'snap experimental add-skill'
+    - asserts: make assertion checkers used by db.Check modular and
+      pluggable
+    - cmd,client,daemon,caps,docs,po: remove capabilities
+    - scripts: move the script to get dependencies to a separate file
+    - asserts: make the disk layout compatible for storing more than one
+      revision
+    - cmd/snap: make the assert command options exported
+    - integration-tests: Remove the target release and channel
+    - asserts: introduce model assertion
+    - integration-tests: add exec.Cmd wrapper
+    - cmd/snap: add client test support methods
+    - cmd/snap: move key=value attribute parsing to commmon
+    - cmd/snap: apply new style consistency to "snap" commands.
+    - cmd/snap: support redirecting the client for testing
+    - cmd/snap: support testing command output
+    - snappy,daemon: remove the meta repositories abstractions
+    - cmd: add support for experimental commands
+    - cmd/snappy,daemon,snap,snappy: remove SetActive from parts
+    - cmd/snappy,daemon,snappy,snap: remove config from parts interface
+    - client: improve test data
+    - cmd: allow to construct a fresh parser
+    - cmd: don't treat help as an error
+    - cmd/snappy,snappy: remove "Details" from the repository interface
+    - asserts: check that primary keys are set when
+      Decode()ing/assembling assertions
+    - snap,snappy: refactor to remove "Install" from the Part interface
+    - client,cmd: make client.New() configurable
+    - client: enable retrieving asynchronous operation information with
+      `Client.Operation`.
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 23 Feb 2016 11:28:18 +0100
+
+ubuntu-snappy (1.7.2+20160204ubuntu1) xenial; urgency=medium
+
+  * New git snapshot:
+    - integration-tests: fix the rollback error messages
+    - integration-test: use the common cli method when trying to install
+      an unexisting snap
+    - integration-tests: rename snap find test
+    - daemon: refactor makeErrorResponder()
+    - integration: add regression test for LP: #1541317
+    - integration-tests: reenable TestRollbackMustRebootToOtherVersion
+    - asserts: introduce "snap asserts" subcmd to show assertions in the
+      system db
+    - docs: fix parameter style
+    - daemon: use underscore in JSON interface
+    - client: add skills API
+    - asserts,docs/rest.md: change Encoder not to add extra newlines at
+      the end of the stream
+    - integration-tests: "snappy search" is no more, its "snap search"
+      now
+    - README, integration-tests/tests: chmod snapd.socket after manual
+      start.
+    - snappy: add default security profile if none is specified
+    - skills,daemon: add REST APIs for skills
+    - cmd/snap, cmd/snappy: move from `snappy search` to `snap find`.
+    - The first step towards REST world domination: search is now done
+      via
+    - debian: remove obsolete /etc/grub.d/09_snappy on upgrade
+    - skills: provide different security snippets for skill and slot
+      side
+    - osutil: make go vet happy again
+    - snappy,systemd: use Type field in systemd.ServiceDescription
+    - skills: add basic grant-revoke methods
+    - client,daemon,asserts: expose the ability to query assertions in
+      the system db
+    - skills: add basic methods for slot handling
+    - snappy,daemon,snap: move "Uninstall" into overlord
+    - snappy: move SnapFile.Install() into Overlord.Install()
+    - integration-tests: re-enable some failover tests
+    - client: remove snaps
+    - asserts: uniform searching accross trusted (account keys) and main
+      backstore
+    - asserts: introduce Decoder to parse streams of assertions and
+      Encoder to build them
+    - client: filter snaps with a seach query
+    - client: pass query as well as path in client internals
+    - skills: provide different security snippets for skill and slot
+      side
+    - snappy: refactor snapYaml to remove methods on snapYaml type
+    - snappy: remove unused variable from test
+    - skills: add basic methods for skill handing
+    - snappy: remove support for meta/package.yaml and implement new
+      meta/snap.yaml
+    - snappy: add new overlord type responsible for
+      Installed/Install/Uninstall/SetActive and stub it out
+    - skills: add basic methods for type handling
+    - daemon, snappy: add find (aka search)
+    - client: filter snaps by type
+    - skills: tweak valid names and error messages
+    - skills: add special skill type for testing
+    - cmd/snapd,daemon: filter snaps by type
+    - partition: remove obsolete uEnv.txt
+    - skills: add Type interface
+    - integration-tests: fix the bootloader path
+    - asserts: introduce a memory backed assertion backstore
+    - integration-tests: get name of OS snap from bootloader
+    - cmd/snapd,daemon: filter snaps by source
+    - asserts,daemon: bump some copyright years for things that have
+      been touched in the new year
+    - skills: add the initial Repository type
+    - skills: add a name validation function
+    - client: filter snaps by source
+    - snappy: unmount the squashfs snap again if it fails to install
+    - snap: make a copy of the search uri before mutating it
+      Closes: LP#1537005
+    - cmd/snap,client,daemon,asserts: introduce "assert " snap
+      subcommand
+    - cmd/snappy, snappy: fix failover handling of the "active"
+      kernel/os snap
+    - daemon, client, docs/rest.md, snapd integration tests: move to the
+      new error response
+    - asserts: change Backstore interface, backstores can now access
+      primary key names from types
+    - asserts: make AssertionType into a real struct exposing the
+      metadata Name and PrimaryKey
+    - caps: improve bool-file sanitization
+    - asserts: fixup toolbelt to use exposed key ID.
+    - client: return by reference rather than by value
+    - asserts: exported filesystem backstores + explicit backstores
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 04 Feb 2016 16:35:31 +0100
+
+ubuntu-snappy (1.7.2+20160113ubuntu1) xenial; urgency=medium
+
+  * New git snapshot
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Wed, 13 Jan 2016 11:25:40 +0100
+
+ubuntu-snappy (1.7.2ubuntu1) xenial; urgency=medium
+
+  * New upstream release:
+    - bin-path integration
+    - assertions/capability work
+    - fix squashfs based snap building
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Fri, 04 Dec 2015 08:46:35 +0100
+
+ubuntu-snappy (1.7.1ubuntu1) xenial; urgency=medium
+
+  * New upstream release:
+    - fix dependencies
+    - fix armhf builds
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Wed, 02 Dec 2015 07:46:07 +0100
+
+ubuntu-snappy (1.7ubuntu1) xenial; urgency=medium
+
+  * New upstream release:
+    - kernel/os snap support
+    - squashfs snap support
+    - initial capabilities work
+    - initial assertitions work
+    - rest API support
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Wed, 18 Nov 2015 19:59:51 +0100
+
+ubuntu-snappy (1.6ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Fix hwaccess for gpio (LP: #1493389, LP: #1488618)
+    - Fix handleAssets name normalization
+    - Run boot-ok job late (LP: #1476129)
+    - Add support for systemd socket files
+    - Add "snappy service" command
+    - Documentation improvements
+    - Many test improvements (unit and integration)
+    - Override sideload versions
+    - Go1.5 fixes
+    - Add i18n
+    - Add man-page
+    - Add .snapignore
+    - Run services that uses external ports only after the network is up
+    - Bufix in Synbootloader (LP: 1474125)
+    - Use uboot.env for boot state tracking
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Wed, 09 Sep 2015 14:20:22 +0200
+
+ubuntu-snappy (1.5ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Use O_TRUNC when copying files
+    - Added path redefinition to include test's binaries location
+    - Don't run update-grub, instead use grub.cfg from the oem
+      package
+    - Do network configuration from first boot
+    - zero size systemd of new partition made executable to
+      prevent unrecoverable boot failure
+    - Close downloaded files
+
+ -- Ricardo Salveti de Araujo <ricardo.salveti@canonical.com>  Mon, 06 Jul 2015 15:14:37 -0300
+
+ubuntu-snappy (1.4ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Allow to run the integration tests using snappy from branch
+    - Add CopyFileOverwrite flag and behaviour to helpers.CopyFile
+    - add a bunch of missing i18n.G() now that we have gettext
+    - Generate only the translators comments that start with
+      TRANSLATORS
+    - Try both clickpkg and snappypkg when dropping privs
+
+ -- Ricardo Salveti de Araujo <ricardo.salveti@canonical.com>  Thu, 02 Jul 2015 16:21:53 -0300
+
+ubuntu-snappy (1.3ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - gettext support
+    - use snappypkg user for the installed snaps
+    - switch to system-image-3.x as the system-image backend
+    - more reliable developer mode detection
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Wed, 01 Jul 2015 10:37:05 +0200
+
+ubuntu-snappy (1.2-0ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Consider the root directory when installing and removing policies
+    - In the uboot TestHandleAssetsNoHardwareYaml, patch the cache dir
+      before creating the partition type
+    - In the PartitionTestSuite, remove the unnecesary patches for
+      defaultCacheDir
+    - Fix the help output of "snappy install -h"
+
+ -- Ricardo Salveti de Araujo <ricardo.salveti@canonical.com>  Wed, 17 Jun 2015 11:42:47 -0300
+
+ubuntu-snappy (1.1.2-0ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Remove compatibility for click-bin-path in generated exec-wrappers
+    - Release the readme.md after parsing it
+
+ -- Ricardo Salveti de Araujo <ricardo.salveti@canonical.com>  Thu, 11 Jun 2015 23:42:49 -0300
+
+ubuntu-snappy (1.1.1-0ubuntu1) wily; urgency=medium
+
+  * New upstream release, including the following changes:
+    - Set all app services to restart on failure
+    - Fixes the missing oauth quoting and makes the code a bit nicer
+    - Added integrate() to set Integration to default values needed for
+      integration
+    - Moved setActivateClick to be a method of SnapPart
+    - Make unsetActiveClick a method of SnapPart
+    - Check the package.yaml for the required fields
+    - Integrate lp:snappy/selftest branch into snappy itself
+    - API to record information about the image and to check if the kernel was
+      sideloaded.
+    - Factor out update from cmd
+    - Continue updating when a sideload error is returned
+
+ -- Ricardo Salveti de Araujo <ricardo.salveti@canonical.com>  Wed, 10 Jun 2015 15:54:12 -0300
+
+ubuntu-snappy (1.1-0ubuntu1) wily; urgency=low
+
+  * New wily upload with fix for go 1.4 syscall.Setgid() breakage
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 09 Jun 2015 10:02:04 +0200
+
+ubuntu-snappy (1.0.1-0ubuntu1) vivid; urgency=low
+
+  * fix symlink unpacking
+  * fix typo in apparmor rules generation
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 23 Apr 2015 16:09:56 +0200
+
+ubuntu-snappy (1.0-0ubuntu1) vivid; urgency=low
+
+  * 15.04 archive upload
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 23 Apr 2015 11:08:22 +0200
+
+ubuntu-snappy (0.1.2-0ubuntu1) vivid; urgency=medium
+
+  * initial ubuntu archive upload
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Mon, 13 Apr 2015 22:48:13 -0500
+
+ubuntu-snappy (0.1.1-0ubuntu1) vivid; urgency=low
+
+  * new snapshot
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Thu, 12 Feb 2015 13:51:22 +0100
+
+ubuntu-snappy (0.1-0ubuntu1) vivid; urgency=medium 
+
+  * Initial packaging
+
+ -- Sergio Schvezov <sergio.schvezov@canonical.com>  Fri, 06 Feb 2015 02:25:43 -0200
