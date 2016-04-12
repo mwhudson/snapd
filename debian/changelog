@@ -1,3 +1,10 @@
+snapd (1.9.1.1) xenial; urgency=medium
+
+  * debian/tests/control:
+    - add git to make autopkgtest work
+
+ -- Michael Vogt <michael.vogt@ubuntu.com>  Tue, 12 Apr 2016 17:19:19 +0200
+
 snapd (1.9.1) xenial; urgency=medium
 
   * Add warning about installing ubuntu-core-snapd-units on Desktop systems.
