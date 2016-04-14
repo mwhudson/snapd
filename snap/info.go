@@ -21,6 +21,8 @@ package snap
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -60,8 +62,8 @@ func MountDir(name string, revision int) string {
 // SideInfo holds snap metadata that is not included in snap.yaml or for which the store is the canonical source.
 // It can be marshalled both as JSON and YAML.
 type SideInfo struct {
-	// XXX likely we want also snap-id
 	OfficialName      string `yaml:"name,omitempty" json:"name,omitempty"`
+	SnapID            string `yaml:"snap-id" json:"snap-id"`
 	Revision          int    `yaml:"revision" json:"revision"`
 	Channel           string `yaml:"channel,omitempty" json:"channel,omitempty"`
 	Developer         string `yaml:"developer,omitempty" json:"developer,omitempty"`
@@ -70,6 +72,8 @@ type SideInfo struct {
 	Size              int64  `yaml:"size,omitempty" json:"size,omitempty"`
 	Sha512            string `yaml:"sha512,omitempty" json:"sha512,omitempty"`
 	IconURL           string `yaml:"icon-url,omitempty" json:"icon-url,omitempty"`
+
+	Prices map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 }
 
 // Info provides information about snaps.
@@ -225,4 +229,27 @@ func (app *AppInfo) ServiceFile() string {
 // ServiceSocketFile returns the systemd socket file path for the daemon app.
 func (app *AppInfo) ServiceSocketFile() string {
 	return filepath.Join(dirs.SnapServicesDir, app.SecurityTag()+".socket")
+}
+
+// ReadInfo reads the snap information for the installed snap with the given name and given side-info.
+func ReadInfo(name string, si *SideInfo) (*Info, error) {
+	// XXX: test directly when we don't have to invent the nth way
+	// to mock installed snaps!
+	snapYamlFn := filepath.Join(MountDir(name, si.Revision), "meta", "snap.yaml")
+	meta, err := ioutil.ReadFile(snapYamlFn)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("cannot find mounted snap %q at revision %d", name, si.Revision)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := InfoFromSnapYaml(meta)
+	if err != nil {
+		return nil, err
+	}
+
+	info.SideInfo = *si
+
+	return info, nil
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/ubuntu-core/snappy/interfaces"
 	"github.com/ubuntu-core/snappy/lockfile"
 	"github.com/ubuntu-core/snappy/overlord"
+	"github.com/ubuntu-core/snappy/overlord/auth"
 	"github.com/ubuntu-core/snappy/overlord/ifacestate"
 	"github.com/ubuntu-core/snappy/overlord/snapstate"
 	"github.com/ubuntu-core/snappy/overlord/state"
@@ -62,7 +63,6 @@ var api = []*Command{
 	snapCmd,
 	//FIXME: renenable config for GA
 	//snapConfigCmd,
-	operationCmd,
 	interfacesCmd,
 	assertsCmd,
 	assertsFindManyCmd,
@@ -75,7 +75,7 @@ var (
 	rootCmd = &Command{
 		Path:    "/",
 		GuestOK: true,
-		GET:     SyncResponse([]string{"TBD"}).Self,
+		GET:     SyncResponse([]string{"TBD"}, nil).Self,
 	}
 
 	sysInfoCmd = &Command{
@@ -116,11 +116,6 @@ var (
 			PUT:  snapConfig,
 		}
 	*/
-	operationCmd = &Command{
-		Path:   "/v2/operations/{uuid}",
-		GET:    getOpInfo,
-		DELETE: deleteOp,
-	}
 
 	interfacesCmd = &Command{
 		Path:   "/v2/interfaces",
@@ -178,17 +173,7 @@ func sysInfo(c *Command, r *http.Request) Response {
 		m["store"] = store
 	}
 
-	return SyncResponse(m)
-}
-
-type authState struct {
-	Users []userAuthState `json:"users"`
-}
-
-type userAuthState struct {
-	Username   string   `json:"username,omitempty"`
-	Macaroon   string   `json:"macaroon,omitempty"`
-	Discharges []string `json:"discharges,omitempty"`
+	return SyncResponse(m, nil)
 }
 
 type loginResponseData struct {
@@ -223,40 +208,59 @@ func loginUser(c *Command, r *http.Request) Response {
 			},
 			Status: http.StatusUnauthorized,
 		}
-		return SyncResponse(twofactorRequiredResponse)
+		return SyncResponse(twofactorRequiredResponse, nil)
 	}
 	if err != nil {
 		return Unauthorized(err.Error())
 	}
 
-	authenticatedUser := userAuthState{
-		Username:   loginData.Username,
-		Macaroon:   macaroon,
-		Discharges: []string{discharge},
-	}
-	// TODO Handle better the multi-user case.
-	authStateData := authState{Users: []userAuthState{authenticatedUser}}
-
 	overlord := c.d.overlord
 	state := overlord.State()
 	state.Lock()
-	state.Set("auth", authStateData)
+	_, err = auth.NewUser(state, loginData.Username, macaroon, []string{discharge})
 	state.Unlock()
+	if err != nil {
+		return InternalError("cannot persist authentication details: %v", err)
+	}
 
 	result := loginResponseData{
 		Macaroon:   macaroon,
 		Discharges: []string{discharge},
 	}
-	return SyncResponse(result)
+	return SyncResponse(result, nil)
 }
 
 type metarepo interface {
-	Snap(string, string) (*snap.Info, error)
-	FindSnaps(string, string) ([]*snap.Info, error)
+	Snap(string, string, store.Authenticator) (*snap.Info, error)
+	FindSnaps(string, string, store.Authenticator) ([]*snap.Info, error)
+	SuggestedCurrency() string
 }
 
 var newRemoteRepo = func() metarepo {
 	return snappy.NewConfiguredUbuntuStoreSnapRepository()
+}
+
+func localSnapInfo(st *state.State, name string) (info *snap.Info, active bool, err error) {
+	st.Lock()
+	defer st.Unlock()
+
+	var snapst snapstate.SnapState
+	err = snapstate.Get(st, name, &snapst)
+	if err != nil && err != state.ErrNoState {
+		return nil, false, fmt.Errorf("cannot consult state: %v", err)
+	}
+
+	cur := snapst.Current()
+	if cur == nil {
+		return nil, false, nil
+	}
+
+	info, err = snap.ReadInfo(name, cur)
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot read snap details: %v", err)
+	}
+
+	return info, snapst.Active, nil
 }
 
 var muxVars = mux.Vars
@@ -265,23 +269,23 @@ func getSnapInfo(c *Command, r *http.Request) Response {
 	vars := muxVars(r)
 	name := vars["name"]
 
-	lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-	if err != nil {
-		return InternalError("unable to acquire lock: %v", err)
-	}
-	defer lock.Unlock()
-
 	channel := ""
-	remoteSnap, _ := newRemoteRepo().Snap(name, channel)
+	remoteRepo := newRemoteRepo()
+	suggestedCurrency := remoteRepo.SuggestedCurrency()
 
-	installed, err := (&snappy.Overlord{}).Installed()
+	localSnap, active, err := localSnapInfo(c.d.overlord.State(), name)
 	if err != nil {
-		return InternalError("cannot load snaps: %v", err)
+		return InternalError("%v", err)
 	}
-	localSnaps := snappy.FindSnapsByName(name, installed)
 
-	if len(localSnaps) == 0 && remoteSnap == nil {
-		return NotFound("unable to find snap with name %q", name)
+	if localSnap != nil {
+		channel = localSnap.Channel
+	}
+
+	remoteSnap, _ := remoteRepo.Snap(name, channel, nil)
+
+	if localSnap == nil && remoteSnap == nil {
+		return NotFound("cannot find snap %q", name)
 	}
 
 	route := c.d.router.Get(c.Path)
@@ -294,9 +298,12 @@ func getSnapInfo(c *Command, r *http.Request) Response {
 		return InternalError("route can't build URL for snap %s: %v", name, err)
 	}
 
-	result := webify(mapSnap(localSnaps, remoteSnap), url.String())
+	result := webify(mapSnap(localSnap, active, remoteSnap), url.String())
 
-	return SyncResponse(result)
+	meta := &Meta{
+		SuggestedCurrency: suggestedCurrency,
+	}
+	return SyncResponse(result, meta)
 }
 
 func webify(result map[string]interface{}, resource string) map[string]interface{} {
@@ -333,8 +340,6 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 	}
 	defer lock.Unlock()
 
-	// TODO: Marshal incrementally leveraging json.RawMessage.
-	results := make(map[string]map[string]interface{})
 	sources := make([]string, 0, 2)
 	query := r.URL.Query()
 
@@ -359,16 +364,20 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		includeTypes = strings.Split(query["types"][0], ",")
 	}
 
-	var localSnapsMap map[string][]*snappy.Snap
+	var localSnapMap map[string][]*snappy.Snap
 	var remoteSnapMap map[string]*snap.Info
 
 	if includeLocal {
 		sources = append(sources, "local")
-		localSnapsMap, _ = allSnaps()
+		localSnapMap, _ = allSnaps()
 	}
+
+	var suggestedCurrency string
 
 	if includeStore {
 		remoteSnapMap = make(map[string]*snap.Info)
+
+		remoteRepo := newRemoteRepo()
 
 		// repo.Find("") finds all
 		//
@@ -376,7 +385,8 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		//   * if there are no results, return an error response.
 		//   * If there are results at all (perhaps local), include a
 		//     warning in the response
-		found, _ := newRemoteRepo().FindSnaps(searchTerm, "")
+		found, _ := remoteRepo.FindSnaps(searchTerm, "", nil)
+		suggestedCurrency = remoteRepo.SuggestedCurrency()
 
 		sources = append(sources, "store")
 
@@ -385,59 +395,60 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		}
 	}
 
-	for name, localSnaps := range localSnapsMap {
-		// strings.Contains(fullname, "") is true
-		if !strings.Contains(name, searchTerm) {
-			continue
+	seen := make(map[string]bool)
+	results := make([]*json.RawMessage, 0, len(localSnapMap)+len(remoteSnapMap))
+
+	addResult := func(name string, m map[string]interface{}) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+
+		// TODO Search the store for "content" with multiple values. See:
+		//      https://wiki.ubuntu.com/AppStore/Interfaces/ClickPackageIndex#Search
+		if len(includeTypes) > 0 && !resultHasType(m, includeTypes) {
+			return
 		}
 
-		m := mapSnap(localSnaps, remoteSnapMap[name])
-		resource := "no resource URL for this resource"
+		resource := ""
 		url, err := route.URL("name", name)
 		if err == nil {
 			resource = url.String()
 		}
 
-		results[name] = webify(m, resource)
+		data, err := json.Marshal(webify(m, resource))
+		if err != nil {
+			return
+		}
+		raw := json.RawMessage(data)
+		results = append(results, &raw)
+	}
+
+	for name, localSnaps := range localSnapMap {
+		// strings.Contains(fullname, "") is true
+		if strings.Contains(name, searchTerm) {
+			// XXX: will be cleaned up soon when allSnaps equivalent is state based
+			_, best := bestSnap(localSnaps)
+			if best == nil {
+				continue
+			}
+			addResult(name, mapSnap(best.Info(), best.IsActive(), remoteSnapMap[name]))
+		}
 	}
 
 	for name, remoteSnap := range remoteSnapMap {
-		if _, ok := results[name]; ok {
-			// already done
-			continue
-		}
-
-		m := mapSnap(nil, remoteSnap)
-
-		resource := "no resource URL for this resource"
-		url, err := route.URL("name", remoteSnap.Name())
-		if err == nil {
-			resource = url.String()
-		}
-
-		results[name] = webify(m, resource)
+		addResult(name, mapSnap(nil, false, remoteSnap))
 	}
 
-	// TODO: it should be possible to search on the "content" field on the store
-	//       with multiple values, see:
-	//       https://wiki.ubuntu.com/AppStore/Interfaces/ClickPackageIndex#Search
-	if len(includeTypes) > 0 {
-		for name, result := range results {
-			if !resultHasType(result, includeTypes) {
-				delete(results, name)
-			}
-		}
-	}
-
-	return SyncResponse(map[string]interface{}{
-		"snaps":   results,
-		"sources": sources,
-		"paging": map[string]interface{}{
-			"pages": 1,
-			"page":  1,
-			"count": len(results),
+	meta := &Meta{
+		Sources: sources,
+		Paging: &Paging{
+			Page:  1,
+			Pages: 1,
 		},
-	})
+		SuggestedCurrency: suggestedCurrency,
+	}
+	return SyncResponse(results, meta)
 }
 
 func resultHasType(r map[string]interface{}, allowedTypes []string) bool {
@@ -452,80 +463,6 @@ func resultHasType(r map[string]interface{}, allowedTypes []string) bool {
 type appDesc struct {
 	Op   string          `json:"op"`
 	Spec *snappy.AppYaml `json:"spec"`
-}
-
-type configurator interface {
-	Configure(*snappy.Snap, []byte) ([]byte, error)
-}
-
-var getConfigurator = func() configurator {
-	return &snappy.Overlord{}
-}
-
-func snapConfig(c *Command, r *http.Request) Response {
-	vars := muxVars(r)
-	snapName := vars["name"]
-
-	lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-	if err != nil {
-		return InternalError("unable to acquire lock: %v", err)
-	}
-	defer lock.Unlock()
-
-	installed, err := (&snappy.Overlord{}).Installed()
-	snaps := snappy.FindSnapsByName(snapName, installed)
-	_, part := bestSnap(snaps)
-	if err != nil || part == nil {
-		return NotFound("no snap found with name %q", snapName)
-	}
-
-	if !part.IsActive() {
-		return BadRequest("unable to configure non-active snap")
-	}
-
-	bs, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		return BadRequest("reading config request body gave %v", err)
-	}
-
-	overlord := getConfigurator()
-	config, err := overlord.Configure(part, bs)
-	if err != nil {
-		return InternalError("unable to retrieve config for %s: %v", snapName, err)
-	}
-
-	return SyncResponse(string(config))
-}
-
-func getOpInfo(c *Command, r *http.Request) Response {
-	route := c.d.router.Get(c.Path)
-	if route == nil {
-		return InternalError("router can't find route for operation")
-	}
-
-	id := muxVars(r)["uuid"]
-	task := c.d.GetTask(id)
-	if task == nil {
-		return NotFound("unable to find task with id %q", id)
-	}
-
-	return SyncResponse(task.Map(route))
-}
-
-func deleteOp(c *Command, r *http.Request) Response {
-	id := muxVars(r)["uuid"]
-	err := c.d.DeleteTask(id)
-
-	switch err {
-	case nil:
-		return SyncResponse("done")
-	case errTaskNotFound:
-		return NotFound("unable to find task %q", id)
-	case errTaskStillRunning:
-		return BadRequest("unable to delete task %q: still running", id)
-	default:
-		return InternalError("unable to delete task %q: %v", id, err)
-	}
 }
 
 // licenseData holds details about the snap license, and may be
@@ -565,6 +502,8 @@ func (inst *snapInstruction) Agreed(intro, license string) bool {
 }
 
 var snapstateInstall = snapstate.Install
+var snapstateInstallPath = snapstate.InstallPath
+var snapstateGet = snapstate.Get
 
 func waitChange(chg *state.Change) error {
 	select {
@@ -577,29 +516,68 @@ func waitChange(chg *state.Change) error {
 	return chg.Err()
 }
 
-func (inst *snapInstruction) install() interface{} {
+func ensureUbuntuCore(chg *state.Change) error {
+	var ss snapstate.SnapState
+
+	ubuntuCore := "ubuntu-core"
+	err := snapstateGet(chg.State(), ubuntuCore, &ss)
+	if err != state.ErrNoState {
+		return err
+	}
+
+	// FIXME: workaround because we are not fully state based yet
+	installed, err := (&snappy.Overlord{}).Installed()
+	snaps := snappy.FindSnapsByName(ubuntuCore, installed)
+	if len(snaps) > 0 {
+		return nil
+	}
+
+	return installSnap(chg, ubuntuCore, "stable", 0)
+}
+
+func installSnap(chg *state.Change, name, channel string, flags snappy.InstallFlags) error {
+	st := chg.State()
+	ts, err := snapstateInstall(st, name, channel, flags)
+	if err != nil {
+		return err
+	}
+
+	// ensure that each of our task runs after the existing tasks
+	chgts := state.NewTaskSet(chg.Tasks()...)
+	for _, t := range ts.Tasks() {
+		t.WaitAll(chgts)
+	}
+	chg.AddAll(ts)
+
+	return nil
+}
+
+func (inst *snapInstruction) install() (*state.Change, error) {
 	flags := snappy.DoInstallGC
 	if inst.LeaveOld {
 		flags = 0
 	}
-	state := inst.overlord.State()
-	state.Lock()
 	msg := fmt.Sprintf(i18n.G("Install %q snap"), inst.pkg)
 	if inst.Channel != "stable" {
 		msg = fmt.Sprintf(i18n.G("Install %q snap from %q channel"), inst.pkg, inst.Channel)
 	}
-	chg := state.NewChange("install-snap", msg)
-	ts, err := snapstateInstall(state, inst.pkg, inst.Channel, flags)
+
+	st := inst.overlord.State()
+	st.Lock()
+	chg := st.NewChange("install-snap", msg)
+	err := ensureUbuntuCore(chg)
 	if err == nil {
-		chg.AddAll(ts)
+		err = installSnap(chg, inst.pkg, inst.Channel, flags)
 	}
-	state.Unlock()
+	st.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	state.EnsureBefore(0)
-	err = waitChange(chg)
-	return err
+
+	st.EnsureBefore(0)
+
+	return chg, nil
+
 	// FIXME: handle license agreement need to happen in the above
 	//        code
 	/*
@@ -613,7 +591,7 @@ func (inst *snapInstruction) install() interface{} {
 	*/
 }
 
-func (inst *snapInstruction) update() interface{} {
+func (inst *snapInstruction) update() (*state.Change, error) {
 	flags := snappy.DoInstallGC
 	if inst.LeaveOld {
 		flags = 0
@@ -631,14 +609,15 @@ func (inst *snapInstruction) update() interface{} {
 	}
 	state.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	state.EnsureBefore(0)
-	return waitChange(chg)
+
+	return chg, nil
 }
 
-func (inst *snapInstruction) remove() interface{} {
+func (inst *snapInstruction) remove() (*state.Change, error) {
 	flags := snappy.DoRemoveGC
 	if inst.LeaveOld {
 		flags = 0
@@ -653,14 +632,15 @@ func (inst *snapInstruction) remove() interface{} {
 	}
 	state.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	state.EnsureBefore(0)
-	return waitChange(chg)
+
+	return chg, nil
 }
 
-func (inst *snapInstruction) rollback() interface{} {
+func (inst *snapInstruction) rollback() (*state.Change, error) {
 	state := inst.overlord.State()
 	state.Lock()
 	msg := fmt.Sprintf(i18n.G("Rollback %q snap"), inst.pkg)
@@ -673,14 +653,15 @@ func (inst *snapInstruction) rollback() interface{} {
 	}
 	state.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	state.EnsureBefore(0)
-	return waitChange(chg)
+
+	return chg, nil
 }
 
-func (inst *snapInstruction) activate() interface{} {
+func (inst *snapInstruction) activate() (*state.Change, error) {
 	state := inst.overlord.State()
 	state.Lock()
 	msg := fmt.Sprintf(i18n.G("Activate %q snap"), inst.pkg)
@@ -691,14 +672,15 @@ func (inst *snapInstruction) activate() interface{} {
 	}
 	state.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	state.EnsureBefore(0)
-	return waitChange(chg)
+
+	return chg, nil
 }
 
-func (inst *snapInstruction) deactivate() interface{} {
+func (inst *snapInstruction) deactivate() (*state.Change, error) {
 	state := inst.overlord.State()
 	state.Lock()
 	msg := fmt.Sprintf(i18n.G("Deactivate %q snap"), inst.pkg)
@@ -709,14 +691,15 @@ func (inst *snapInstruction) deactivate() interface{} {
 	}
 	state.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	state.EnsureBefore(0)
-	return waitChange(chg)
+
+	return chg, nil
 }
 
-func (inst *snapInstruction) dispatch() func() interface{} {
+func (inst *snapInstruction) dispatch() func() (*state.Change, error) {
 	switch inst.Action {
 	case "install":
 		return inst.install
@@ -735,16 +718,16 @@ func (inst *snapInstruction) dispatch() func() interface{} {
 	}
 }
 
-func pkgActionDispatchImpl(inst *snapInstruction) func() interface{} {
+func pkgActionDispatchImpl(inst *snapInstruction) func() (*state.Change, error) {
 	return inst.dispatch()
 }
 
 var pkgActionDispatch = pkgActionDispatchImpl
 
 func postSnap(c *Command, r *http.Request) Response {
-	route := c.d.router.Get(operationCmd.Path)
+	route := c.d.router.Get(stateChangeCmd.Path)
 	if route == nil {
-		return InternalError("router can't find route for operation")
+		return InternalError("router can't find route for change")
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -762,22 +745,20 @@ func postSnap(c *Command, r *http.Request) Response {
 		return BadRequest("unknown action %s", inst.Action)
 	}
 
-	return AsyncResponse(c.d.AddTask(func() interface{} {
-		lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-		if err != nil {
-			return err
-		}
-		defer lock.Unlock()
-		return f()
-	}).Map(route))
+	chg, err := f()
+	if err != nil {
+		return InternalError("can't %s %q: %v", inst.Action, inst.pkg, err)
+	}
+
+	return AsyncResponse(nil, &Meta{Change: chg.ID()})
 }
 
 const maxReadBuflen = 1024 * 1024
 
 func sideloadSnap(c *Command, r *http.Request) Response {
-	route := c.d.router.Get(operationCmd.Path)
+	route := c.d.router.Get(stateChangeCmd.Path)
 	if route == nil {
-		return InternalError("router can't find route for operation")
+		return InternalError("router can't find route for change")
 	}
 
 	body := r.Body
@@ -785,7 +766,7 @@ func sideloadSnap(c *Command, r *http.Request) Response {
 	contentType := r.Header.Get("Content-Type")
 
 	if strings.HasPrefix(contentType, "multipart/") {
-		// spec says POSTs to sideload snaps should be “a multipart file upload”
+		// spec says POSTs to sideload snaps should be "a multipart file upload"
 
 		_, params, err := mime.ParseMediaType(contentType)
 		if err != nil {
@@ -834,53 +815,45 @@ func sideloadSnap(c *Command, r *http.Request) Response {
 		return InternalError("can't copy request into tempfile: %v", err)
 	}
 
-	return AsyncResponse(c.d.AddTask(func() interface{} {
-		lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-		if err != nil {
-			return err
-		}
-		defer lock.Unlock()
+	var flags snappy.InstallFlags
+	if unsignedOk {
+		flags |= snappy.AllowUnauthenticated
+	}
 
-		var flags snappy.InstallFlags
-		if unsignedOk {
-			flags |= snappy.AllowUnauthenticated
-		}
+	snap := tmpf.Name()
 
-		snap := tmpf.Name()
-		defer os.Remove(snap)
+	state := c.d.overlord.State()
+	state.Lock()
+	msg := fmt.Sprintf(i18n.G("Install local %q snap"), snap)
+	chg := state.NewChange("install-snap", msg)
+	ts, err := snapstateInstallPath(state, snap, "", flags)
+	if err == nil {
+		chg.AddAll(ts)
+	}
+	state.Unlock()
+	go func() {
+		// XXX this needs to be a task in the manager; this is a hack to keep this branch smaller
+		<-chg.Ready()
+		os.Remove(snap)
+	}()
+	if err != nil {
+		return InternalError("can't request sideload: %v", err)
+	}
+	state.EnsureBefore(0)
 
-		state := c.d.overlord.State()
-		state.Lock()
-		msg := fmt.Sprintf(i18n.G("Install local %q snap"), snap)
-		chg := state.NewChange("install-snap", msg)
-		ts, err := snapstateInstall(state, snap, "", flags)
-		if err == nil {
-			chg.AddAll(ts)
-		}
-		state.Unlock()
-		if err != nil {
-			return err
-		}
-		state.EnsureBefore(0)
-		return waitChange(chg)
-	}).Map(route))
+	return AsyncResponse(nil, &Meta{Change: chg.ID()})
 }
 
-func iconGet(name string) Response {
-	lock, err := lockfile.Lock(dirs.SnapLockFile, true)
+func iconGet(st *state.State, name string) Response {
+	info, _, err := localSnapInfo(st, name)
 	if err != nil {
-		return InternalError("unable to acquire lock: %v", err)
+		return InternalError("%v", err)
 	}
-	defer lock.Unlock()
-
-	installed, err := (&snappy.Overlord{}).Installed()
-	snaps := snappy.FindSnapsByName(name, installed)
-	_, snap := bestSnap(snaps)
-	if err != nil || snap == nil {
-		return NotFound("unable to find snap with name %q", name)
+	if info == nil {
+		return NotFound("cannot find snap %q", name)
 	}
 
-	path := filepath.Clean(snap.Icon())
+	path := filepath.Clean(snapIcon(info))
 	if !strings.HasPrefix(path, dirs.SnapSnapsDir) {
 		// XXX: how could this happen?
 		return BadRequest("requested icon is not in snap path")
@@ -893,13 +866,13 @@ func appIconGet(c *Command, r *http.Request) Response {
 	vars := muxVars(r)
 	name := vars["name"]
 
-	return iconGet(name)
+	return iconGet(c.d.overlord.State(), name)
 }
 
 // getInterfaces returns all plugs and slots.
 func getInterfaces(c *Command, r *http.Request) Response {
 	repo := c.d.overlord.InterfaceManager().Repository()
-	return SyncResponse(repo.Interfaces())
+	return SyncResponse(repo.Interfaces(), nil)
 }
 
 // plugJSON aids in marshaling Plug into JSON.
@@ -977,7 +950,7 @@ func changeInterfaces(c *Command, r *http.Request) Response {
 		if err != nil {
 			return BadRequest("%v", err)
 		}
-		return SyncResponse(nil)
+		return SyncResponse(nil, nil)
 	case "disconnect":
 		if len(a.Plugs) == 0 || len(a.Slots) == 0 {
 			return BadRequest("at least one plug and slot is required")
@@ -1001,7 +974,7 @@ func changeInterfaces(c *Command, r *http.Request) Response {
 		if err != nil {
 			return BadRequest("%v", err)
 		}
-		return SyncResponse(nil)
+		return SyncResponse(nil, nil)
 	}
 	return BadRequest("unsupported interface action: %q", a.Action)
 }
@@ -1059,33 +1032,51 @@ type changeInfo struct {
 	Summary string      `json:"summary"`
 	Status  string      `json:"status"`
 	Tasks   []*taskInfo `json:"tasks,omitempty"`
+	Ready   bool        `json:"ready"`
+	Err     string      `json:"err,omitempty"`
 }
 
 type taskInfo struct {
-	Kind     string   `json:"kind"`
-	Summary  string   `json:"summary"`
-	Status   string   `json:"status"`
-	Log      []string `json:"log,omitempty"`
-	Progress [2]int   `json:"progress"`
+	ID       string           `json:"id"`
+	Kind     string           `json:"kind"`
+	Summary  string           `json:"summary"`
+	Status   string           `json:"status"`
+	Log      []string         `json:"log,omitempty"`
+	Progress taskInfoProgress `json:"progress"`
+}
+
+type taskInfoProgress struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
 }
 
 func change2changeInfo(chg *state.Change) *changeInfo {
+	status := chg.Status()
 	chgInfo := &changeInfo{
 		ID:      chg.ID(),
 		Kind:    chg.Kind(),
 		Summary: chg.Summary(),
-		Status:  chg.Status().String(),
+		Status:  status.String(),
+		Ready:   status.Ready(),
 	}
+	if err := chg.Err(); err != nil {
+		chgInfo.Err = err.Error()
+	}
+
 	tasks := chg.Tasks()
 	taskInfos := make([]*taskInfo, len(tasks))
 	for j, t := range tasks {
-		cur, tot := t.Progress()
+		done, total := t.Progress()
 		taskInfo := &taskInfo{
-			Kind:     t.Kind(),
-			Summary:  t.Summary(),
-			Status:   t.Status().String(),
-			Log:      t.Log(),
-			Progress: [2]int{cur, tot},
+			ID:      t.ID(),
+			Kind:    t.Kind(),
+			Summary: t.Summary(),
+			Status:  t.Status().String(),
+			Log:     t.Log(),
+			Progress: taskInfoProgress{
+				Done:  done,
+				Total: total,
+			},
 		}
 		taskInfos[j] = taskInfo
 	}
@@ -1104,7 +1095,7 @@ func getChange(c *Command, r *http.Request) Response {
 		return NotFound("unable to find change with id %q", chID)
 	}
 
-	return SyncResponse(change2changeInfo(chg))
+	return SyncResponse(change2changeInfo(chg), nil)
 }
 
 func getChanges(c *Command, r *http.Request) Response {
@@ -1136,6 +1127,5 @@ func getChanges(c *Command, r *http.Request) Response {
 		}
 		chgInfos = append(chgInfos, change2changeInfo(chg))
 	}
-
-	return SyncResponse(chgInfos)
+	return SyncResponse(chgInfos, nil)
 }

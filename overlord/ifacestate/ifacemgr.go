@@ -23,6 +23,7 @@ package ifacestate
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/tomb.v2"
 
@@ -37,7 +38,6 @@ import (
 	"github.com/ubuntu-core/snappy/overlord/snapstate"
 	"github.com/ubuntu-core/snappy/overlord/state"
 	"github.com/ubuntu-core/snappy/snap"
-	"github.com/ubuntu-core/snappy/snappy"
 )
 
 // InterfaceManager is responsible for the maintenance of interfaces in
@@ -50,20 +50,15 @@ type InterfaceManager struct {
 }
 
 // Manager returns a new InterfaceManager.
-func Manager(s *state.State) (*InterfaceManager, error) {
-	repo := interfaces.NewRepository()
-	for _, iface := range builtin.Interfaces() {
-		if err := repo.AddInterface(iface); err != nil {
-			return nil, err
-		}
-	}
+// Extra interfaces can be provided for testing.
+func Manager(s *state.State, extra []interfaces.Interface) (*InterfaceManager, error) {
 	runner := state.NewTaskRunner(s)
 	m := &InterfaceManager{
 		state:  s,
 		runner: runner,
-		repo:   repo,
+		repo:   interfaces.NewRepository(),
 	}
-	if err := m.addSnaps(); err != nil {
+	if err := m.initialize(extra); err != nil {
 		return nil, err
 	}
 	runner.AddHandler("connect", m.doConnect, nil)
@@ -73,8 +68,38 @@ func Manager(s *state.State) (*InterfaceManager, error) {
 	return m, nil
 }
 
+func (m *InterfaceManager) initialize(extra []interfaces.Interface) error {
+	m.state.Lock()
+	defer m.state.Unlock()
+
+	if err := m.addInterfaces(extra); err != nil {
+		return err
+	}
+	if err := m.addSnaps(); err != nil {
+		return err
+	}
+	if err := m.reloadConnections(""); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *InterfaceManager) addInterfaces(extra []interfaces.Interface) error {
+	for _, iface := range builtin.Interfaces() {
+		if err := m.repo.AddInterface(iface); err != nil {
+			return err
+		}
+	}
+	for _, iface := range extra {
+		if err := m.repo.AddInterface(iface); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *InterfaceManager) addSnaps() error {
-	snaps, err := xxxHackyInstalledSnaps()
+	snaps, err := snapstate.ActiveInfos(m.state)
 	if err != nil {
 		return err
 	}
@@ -87,16 +112,44 @@ func (m *InterfaceManager) addSnaps() error {
 	return nil
 }
 
-func xxxHackyInstalledSnaps() ([]*snap.Info, error) {
-	installed, err := (&snappy.Overlord{}).Installed()
+// reloadConnections reloads connections stored in the state in the repository.
+// Using non-empty snapName the operation can be scoped to connections
+// affecting a given snap.
+func (m *InterfaceManager) reloadConnections(snapName string) error {
+	conns, err := getConns(m.state)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	snaps := make([]*snap.Info, len(installed))
-	for i, legacySnap := range installed {
-		snaps[i] = legacySnap.Info()
+	for id := range conns {
+		plugRef, slotRef, err := parseConnID(id)
+		if err != nil {
+			return err
+		}
+		if snapName != "" && plugRef.Snap != snapName && slotRef.Snap != snapName {
+			continue
+		}
+		err = m.repo.Connect(plugRef.Snap, plugRef.Name, slotRef.Snap, slotRef.Name)
+		if err != nil {
+			logger.Noticef("%s", err)
+		}
 	}
-	return snaps, nil
+	return nil
+}
+
+func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, repo *interfaces.Repository) error {
+	var snapState snapstate.SnapState
+	snapName := snapInfo.Name()
+	if err := snapstate.Get(task.State(), snapName, &snapState); err != nil {
+		task.Errorf("cannot get state of snap %q: %s", snapName, err)
+		return err
+	}
+	for _, backend := range securityBackends {
+		if err := backend.Setup(snapInfo, snapState.DevMode, repo); err != nil {
+			task.Errorf("cannot setup %s for snap %q: %s", backend.Name(), snapName, err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) error {
@@ -140,20 +193,18 @@ func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) e
 			return err
 		}
 	}
+	if err := m.reloadConnections(snapName); err != nil {
+		return err
+	}
 	if err := m.autoConnect(task, snapName); err != nil {
 		return err
 	}
-	// TODO: re-connect all connection affecting given snap
-	// TODO:  - removing failed connections from the state
 	if len(affectedSnaps) == 0 {
 		affectedSnaps = append(affectedSnaps, snapInfo)
 	}
 	for _, snapInfo := range affectedSnaps {
-		for _, backend := range securityBackendsForSnap(snapInfo) {
-			developerMode := false // TODO: move this to snap.Info
-			if err := backend.Setup(snapInfo, developerMode, m.repo); err != nil {
-				return state.Retry
-			}
+		if err := setupSnapSecurity(task, snapInfo, m.repo); err != nil {
+			return state.Retry
 		}
 	}
 	return nil
@@ -162,6 +213,25 @@ func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) e
 type connState struct {
 	Auto      bool   `json:"auto,omitempty"`
 	Interface string `json:"interface,omitempty"`
+}
+
+func connID(plug *interfaces.PlugRef, slot *interfaces.SlotRef) string {
+	return fmt.Sprintf("%s:%s %s:%s", plug.Snap, plug.Name, slot.Snap, slot.Name)
+}
+
+func parseConnID(conn string) (*interfaces.PlugRef, *interfaces.SlotRef, error) {
+	parts := strings.SplitN(conn, " ", 2)
+	if len(parts) != 2 {
+		return nil, nil, fmt.Errorf("malformed connection identifier: %q", conn)
+	}
+	plugParts := strings.SplitN(parts[0], ":", 2)
+	slotParts := strings.SplitN(parts[1], ":", 2)
+	if len(plugParts) != 2 || len(slotParts) != 2 {
+		return nil, nil, fmt.Errorf("malformed connection identifier: %q", conn)
+	}
+	plugRef := &interfaces.PlugRef{Snap: plugParts[0], Name: plugParts[1]}
+	slotRef := &interfaces.SlotRef{Snap: slotParts[0], Name: slotParts[1]}
+	return plugRef, slotRef, nil
 }
 
 func (m *InterfaceManager) autoConnect(task *state.Task, snapName string) error {
@@ -218,7 +288,7 @@ func (m *InterfaceManager) doRemoveSnapSecurity(task *state.Task, _ *tomb.Tomb) 
 		affectedSnaps = append(affectedSnaps, snapInfo)
 	}
 	for _, snapInfo := range affectedSnaps {
-		for _, backend := range securityBackendsForSnap(snapInfo) {
+		for _, backend := range securityBackends {
 			if err := backend.Remove(snapInfo.Name()); err != nil {
 				return state.Retry
 			}
@@ -226,18 +296,6 @@ func (m *InterfaceManager) doRemoveSnapSecurity(task *state.Task, _ *tomb.Tomb) 
 	}
 	return nil
 }
-
-func securityBackendsForSnapImpl(snapInfo *snap.Info) []interfaces.SecurityBackend {
-	aaBackend := &apparmor.Backend{}
-	// TODO: Implement special provisions for apparmor and old-security when
-	// old-security becomes a real interface. When that happens we nee to call
-	// backend.UseLegacyTemplate() with the alternate template offered by the
-	// old-security interface.
-	return []interfaces.SecurityBackend{
-		aaBackend, &seccomp.Backend{}, &dbus.Backend{}, &udev.Backend{}}
-}
-
-var securityBackendsForSnap = securityBackendsForSnapImpl
 
 // Connect returns a set of tasks for connecting an interface.
 //
@@ -277,26 +335,90 @@ func getPlugAndSlotRefs(task *state.Task) (*interfaces.PlugRef, *interfaces.Slot
 	return &plugRef, &slotRef, nil
 }
 
+func getConns(st *state.State) (map[string]connState, error) {
+	// Get information about connections from the state
+	var conns map[string]connState
+	err := st.Get("conns", &conns)
+	if err != nil && err != state.ErrNoState {
+		return nil, fmt.Errorf("cannot obtain data about existing connections: %s", err)
+	}
+	if conns == nil {
+		conns = make(map[string]connState)
+	}
+	return conns, nil
+}
+
+func setConns(st *state.State, conns map[string]connState) {
+	st.Set("conns", conns)
+}
+
 func (m *InterfaceManager) doConnect(task *state.Task, _ *tomb.Tomb) error {
-	task.State().Lock()
-	defer task.State().Unlock()
+	st := task.State()
+	st.Lock()
+	defer st.Unlock()
 
 	plugRef, slotRef, err := getPlugAndSlotRefs(task)
 	if err != nil {
 		return err
 	}
-	return m.repo.Connect(plugRef.Snap, plugRef.Name, slotRef.Snap, slotRef.Name)
+
+	conns, err := getConns(st)
+	if err != nil {
+		return err
+	}
+
+	err = m.repo.Connect(plugRef.Snap, plugRef.Name, slotRef.Snap, slotRef.Name)
+	if err != nil {
+		return err
+	}
+
+	plug := m.repo.Plug(plugRef.Snap, plugRef.Name)
+	slot := m.repo.Slot(slotRef.Snap, slotRef.Name)
+	if err := setupSnapSecurity(task, plug.Snap, m.repo); err != nil {
+		return state.Retry
+	}
+	if err := setupSnapSecurity(task, slot.Snap, m.repo); err != nil {
+		return state.Retry
+	}
+
+	conns[connID(plugRef, slotRef)] = connState{Interface: plug.Interface}
+	setConns(st, conns)
+
+	return nil
 }
 
 func (m *InterfaceManager) doDisconnect(task *state.Task, _ *tomb.Tomb) error {
-	task.State().Lock()
-	defer task.State().Unlock()
+	st := task.State()
+	st.Lock()
+	defer st.Unlock()
 
 	plugRef, slotRef, err := getPlugAndSlotRefs(task)
 	if err != nil {
 		return err
 	}
-	return m.repo.Disconnect(plugRef.Snap, plugRef.Name, slotRef.Snap, slotRef.Name)
+
+	conns, err := getConns(st)
+	if err != nil {
+		return err
+	}
+
+	err = m.repo.Disconnect(plugRef.Snap, plugRef.Name, slotRef.Snap, slotRef.Name)
+	if err != nil {
+		return err
+	}
+
+	plug := m.repo.Plug(plugRef.Snap, plugRef.Name)
+	slot := m.repo.Slot(slotRef.Snap, slotRef.Name)
+	if err := setupSnapSecurity(task, plug.Snap, m.repo); err != nil {
+		return state.Retry
+	}
+	if err := setupSnapSecurity(task, slot.Snap, m.repo); err != nil {
+		return state.Retry
+	}
+
+	delete(conns, connID(plugRef, slotRef))
+	setConns(st, conns)
+	return nil
 }
 
 // Ensure implements StateManager.Ensure.
@@ -326,4 +448,17 @@ func (m *InterfaceManager) Stop() {
 // locks to ensure consistency.
 func (m *InterfaceManager) Repository() *interfaces.Repository {
 	return m.repo
+}
+
+// MockSecurityBackends mocks the list of security backends that are used for setting up security.
+//
+// This function is public because it is referenced in the daemon
+func MockSecurityBackends(backends []interfaces.SecurityBackend) func() {
+	old := securityBackends
+	securityBackends = backends
+	return func() { securityBackends = old }
+}
+
+var securityBackends = []interfaces.SecurityBackend{
+	&apparmor.Backend{}, &seccomp.Backend{}, &dbus.Backend{}, &udev.Backend{},
 }

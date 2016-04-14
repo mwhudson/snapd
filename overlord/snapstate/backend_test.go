@@ -20,10 +20,12 @@
 package snapstate_test
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/ubuntu-core/snappy/progress"
 	"github.com/ubuntu-core/snappy/snap"
+	"github.com/ubuntu-core/snappy/store"
 )
 
 type fakeOp struct {
@@ -36,7 +38,7 @@ type fakeOp struct {
 	active  bool
 	sinfo   snap.SideInfo
 
-	rollback string
+	old string
 }
 
 type fakeSnappyBackend struct {
@@ -45,7 +47,7 @@ type fakeSnappyBackend struct {
 	fakeCurrentProgress int
 	fakeTotalProgress   int
 
-	activeSnaps map[string]*snap.Info
+	linkSnapFailTrigger string
 }
 
 func (f *fakeSnappyBackend) InstallLocal(path string, flags int, p progress.Meter) error {
@@ -56,7 +58,7 @@ func (f *fakeSnappyBackend) InstallLocal(path string, flags int, p progress.Mete
 	return nil
 }
 
-func (f *fakeSnappyBackend) Download(name, channel string, p progress.Meter) (*snap.Info, string, error) {
+func (f *fakeSnappyBackend) Download(name, channel string, p progress.Meter, auther store.Authenticator) (*snap.Info, string, error) {
 	f.ops = append(f.ops, fakeOp{
 		op:      "download",
 		name:    name,
@@ -69,37 +71,13 @@ func (f *fakeSnappyBackend) Download(name, channel string, p progress.Meter) (*s
 		SideInfo: snap.SideInfo{
 			OfficialName: strings.Split(name, ".")[0],
 			Channel:      channel,
+			SnapID:       "snapIDsnapidsnapidsnapidsnapidsn",
 			Revision:     11,
 		},
 		Version: name,
 	}
 
 	return info, "downloaded-snap-path", nil
-}
-
-func (f *fakeSnappyBackend) Update(name, channel string, flags int, p progress.Meter) error {
-	f.ops = append(f.ops, fakeOp{
-		op:      "update",
-		name:    name,
-		channel: channel,
-	})
-	return nil
-}
-
-func (f *fakeSnappyBackend) Remove(name string, flags int, p progress.Meter) error {
-	f.ops = append(f.ops, fakeOp{
-		op:   "remove",
-		name: name,
-	})
-	return nil
-}
-func (f *fakeSnappyBackend) Rollback(name, ver string, p progress.Meter) (string, error) {
-	f.ops = append(f.ops, fakeOp{
-		op:       "rollback",
-		name:     name,
-		rollback: ver,
-	})
-	return "", nil
 }
 
 func (f *fakeSnappyBackend) Activate(name string, active bool, p progress.Meter) error {
@@ -111,10 +89,15 @@ func (f *fakeSnappyBackend) Activate(name string, active bool, p progress.Meter)
 	return nil
 }
 
-func (f *fakeSnappyBackend) CheckSnap(snapFilePath string, flags int) error {
+func (f *fakeSnappyBackend) CheckSnap(snapFilePath string, curInfo *snap.Info, flags int) error {
+	cur := "<no-current>"
+	if curInfo != nil {
+		cur = curInfo.MountDir()
+	}
 	f.ops = append(f.ops, fakeOp{
 		op:    "check-snap",
 		name:  snapFilePath,
+		old:   cur,
 		flags: flags,
 	})
 	return nil
@@ -134,19 +117,37 @@ func (f *fakeSnappyBackend) SetupSnap(snapFilePath string, si *snap.SideInfo, fl
 	return nil
 }
 
-func (f *fakeSnappyBackend) CopySnapData(instSnapPath string, flags int) error {
+func (f *fakeSnappyBackend) ReadInfo(name string, si *snap.SideInfo) (*snap.Info, error) {
+	// naive emulation for now, always works
+	return &snap.Info{SideInfo: *si}, nil
+}
+
+func (f *fakeSnappyBackend) CopySnapData(newInfo, oldInfo *snap.Info, flags int) error {
+	old := "<no-old>"
+	if oldInfo != nil {
+		old = oldInfo.MountDir()
+	}
 	f.ops = append(f.ops, fakeOp{
 		op:    "copy-data",
-		name:  instSnapPath,
+		name:  newInfo.MountDir(),
 		flags: flags,
+		old:   old,
 	})
 	return nil
 }
 
-func (f *fakeSnappyBackend) LinkSnap(instSnapPath string) error {
+func (f *fakeSnappyBackend) LinkSnap(info *snap.Info) error {
+	if info.MountDir() == f.linkSnapFailTrigger {
+		f.ops = append(f.ops, fakeOp{
+			op:   "link-snap.failed",
+			name: info.MountDir(),
+		})
+		return errors.New("fail")
+	}
+
 	f.ops = append(f.ops, fakeOp{
 		op:   "link-snap",
-		name: instSnapPath,
+		name: info.MountDir(),
 	})
 	return nil
 }
@@ -159,49 +160,27 @@ func (f *fakeSnappyBackend) UndoSetupSnap(s snap.PlaceInfo) error {
 	return nil
 }
 
-func (f *fakeSnappyBackend) UndoCopySnapData(instSnapPath string, flags int) error {
+func (f *fakeSnappyBackend) UndoCopySnapData(newInfo *snap.Info, flags int) error {
 	f.ops = append(f.ops, fakeOp{
 		op:   "undo-copy-snap-data",
-		name: instSnapPath,
+		name: newInfo.MountDir(),
 	})
 	return nil
 }
 
-func (f *fakeSnappyBackend) UndoLinkSnap(oldInstSnapPath, instSnapPath string) error {
+func (f *fakeSnappyBackend) CanRemove(info *snap.Info, active bool) bool {
 	f.ops = append(f.ops, fakeOp{
-		op:   "undo-link-snap",
-		name: instSnapPath,
+		op:     "can-remove",
+		name:   info.MountDir(),
+		active: active,
 	})
-	return nil
+	return true
 }
 
-func (f *fakeSnappyBackend) ActiveSnap(name string) *snap.Info {
-	return f.activeSnaps[name]
-}
-
-func (f *fakeSnappyBackend) SnapByNameAndVersion(name, version string) *snap.Info {
-	return &snap.Info{
-		SideInfo: snap.SideInfo{
-			OfficialName: name,
-			Revision:     9,
-		},
-		SuggestedName: name,
-		Version:       version,
-	}
-}
-
-func (f *fakeSnappyBackend) CanRemove(instSnapPath string) error {
-	f.ops = append(f.ops, fakeOp{
-		op:   "can-remove",
-		name: instSnapPath,
-	})
-	return nil
-}
-
-func (f *fakeSnappyBackend) UnlinkSnap(instSnapPath string, meter progress.Meter) error {
+func (f *fakeSnappyBackend) UnlinkSnap(info *snap.Info, meter progress.Meter) error {
 	f.ops = append(f.ops, fakeOp{
 		op:   "unlink-snap",
-		name: instSnapPath,
+		name: info.MountDir(),
 	})
 	return nil
 }
@@ -214,11 +193,10 @@ func (f *fakeSnappyBackend) RemoveSnapFiles(s snap.PlaceInfo, meter progress.Met
 	return nil
 }
 
-func (f *fakeSnappyBackend) RemoveSnapData(name string, revno int) error {
+func (f *fakeSnappyBackend) RemoveSnapData(info *snap.Info) error {
 	f.ops = append(f.ops, fakeOp{
-		op:    "remove-snap-data",
-		name:  name,
-		revno: revno,
+		op:   "remove-snap-data",
+		name: info.MountDir(),
 	})
 	return nil
 }
