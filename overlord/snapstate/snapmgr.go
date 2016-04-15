@@ -56,13 +56,23 @@ func (ss *SnapSetup) MountDir() string {
 	return snap.MountDir(ss.Name, ss.Revision)
 }
 
+// SnapStateFlags are flags stored in SnapState.
+type SnapStateFlags int
+
+const (
+	// DevMode switches confinement to non-enforcing mode.
+	DevMode = 1 << iota
+)
+
 // SnapState holds the state for a snap installed in the system.
 type SnapState struct {
 	Sequence  []*snap.SideInfo `json:"sequence"` // Last is current
-	Candidate *snap.SideInfo   `josn:"candidate,omitempty"`
+	Candidate *snap.SideInfo   `json:"candidate,omitempty"`
 	Active    bool             `json:"active,omitempty"`
 	Channel   string           `json:"channel,omitempty"`
-	DevMode   bool             `json:"dev-mode,omitempty"`
+	Flags     SnapStateFlags   `json:"flags,omitempty"`
+	// incremented revision used for local installs
+	LocalRevision int `json:"local-revision,omitempty"`
 }
 
 // Current returns the side info for the current revision in the snap revision sequence if there is one.
@@ -72,6 +82,11 @@ func (snapst *SnapState) Current() *snap.SideInfo {
 		return nil
 	}
 	return snapst.Sequence[n-1]
+}
+
+// DevMode returns true if the snap is installed in developer mode.
+func (snapst *SnapState) DevMode() bool {
+	return snapst.Flags&DevMode != 0
 }
 
 // Manager returns a new snap manager.
@@ -104,10 +119,6 @@ func Manager(s *state.State) (*SnapManager, error) {
 	runner.AddHandler("clear-snap", m.doClearSnapData, nil)
 	runner.AddHandler("discard-snap", m.doDiscardSnap, nil)
 
-	// FIXME: work on those
-	runner.AddHandler("activate-snap", m.doActivateSnap, nil)
-	runner.AddHandler("deactivate-snap", m.doDeactivateSnap, nil)
-
 	// test handlers
 	runner.AddHandler("fake-install-snap", func(t *state.Task, _ *tomb.Tomb) error {
 		return nil
@@ -119,6 +130,17 @@ func Manager(s *state.State) (*SnapManager, error) {
 	return m, nil
 }
 
+func checkRevisionIsNew(name string, snapst *SnapState, revision int) error {
+	for _, si := range snapst.Sequence {
+		if si.Revision == revision {
+			return fmt.Errorf("revision %d of snap %q already installed", revision, name)
+		}
+	}
+	return nil
+}
+
+const firstLocalRevision = 100001
+
 func (m *SnapManager) doPrepareSnap(t *state.Task, _ *tomb.Tomb) error {
 	st := t.State()
 	st.Lock()
@@ -128,25 +150,28 @@ func (m *SnapManager) doPrepareSnap(t *state.Task, _ *tomb.Tomb) error {
 		return err
 	}
 
-	// FIXME: We will need to look at the SnapSetup data for
-	//        AllowUnauthenticated flag and only open a squashfs
-	//        file if we can authenticate it if this flag is
-	//        missing (once we have assertions for this)
-
-	// get the name from the snap
-	snapf, err := snap.Open(ss.SnapPath)
-	if err != nil {
-		return err
+	if ss.Revision == 0 { // sideloading
+		// to not clash with not sideload installs
+		// and to not have clashes between them
+		// use incremental revisions starting at 100001
+		// for sideloads
+		revision := snapst.LocalRevision
+		if revision == 0 {
+			revision = firstLocalRevision
+		} else {
+			revision++
+		}
+		snapst.LocalRevision = revision
+		ss.Revision = revision
+	} else {
+		if err := checkRevisionIsNew(ss.Name, snapst, ss.Revision); err != nil {
+			return err
+		}
 	}
-	info, err := snapf.Info()
-	if err != nil {
-		return err
-	}
-	ss.Name = info.Name()
 
 	st.Lock()
 	t.Set("snap-setup", ss)
-	snapst.Candidate = &snap.SideInfo{}
+	snapst.Candidate = &snap.SideInfo{Revision: ss.Revision}
 	Set(st, ss.Name, snapst)
 	st.Unlock()
 	return nil
@@ -175,8 +200,12 @@ func (m *SnapManager) doDownloadSnap(t *state.Task, _ *tomb.Tomb) error {
 		return err
 	}
 
+	checker := func(info *snap.Info) error {
+		return checkRevisionIsNew(ss.Name, snapst, info.Revision)
+	}
+
 	pb := &TaskProgressAdapter{task: t}
-	storeInfo, downloadedSnapFile, err := m.backend.Download(ss.Name, ss.Channel, pb, nil)
+	storeInfo, downloadedSnapFile, err := m.backend.Download(ss.Name, ss.Channel, checker, pb, nil)
 	if err != nil {
 		return err
 	}
@@ -280,34 +309,6 @@ func (m *SnapManager) doDiscardSnap(t *state.Task, _ *tomb.Tomb) error {
 	Set(st, ss.Name, snapst)
 	st.Unlock()
 	return nil
-}
-
-func (m *SnapManager) doActivateSnap(t *state.Task, _ *tomb.Tomb) error {
-	var ss SnapSetup
-
-	t.State().Lock()
-	err := t.Get("snap-setup", &ss)
-	t.State().Unlock()
-	if err != nil {
-		return err
-	}
-
-	pb := &TaskProgressAdapter{task: t}
-	return m.backend.Activate(ss.Name, true, pb)
-}
-
-func (m *SnapManager) doDeactivateSnap(t *state.Task, _ *tomb.Tomb) error {
-	var ss SnapSetup
-
-	t.State().Lock()
-	err := t.Get("snap-setup", &ss)
-	t.State().Unlock()
-	if err != nil {
-		return err
-	}
-
-	pb := &TaskProgressAdapter{task: t}
-	return m.backend.Activate(ss.Name, false, pb)
 }
 
 // Ensure implements StateManager.Ensure.

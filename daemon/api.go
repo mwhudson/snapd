@@ -37,7 +37,6 @@ import (
 	"github.com/ubuntu-core/snappy/dirs"
 	"github.com/ubuntu-core/snappy/i18n"
 	"github.com/ubuntu-core/snappy/interfaces"
-	"github.com/ubuntu-core/snappy/lockfile"
 	"github.com/ubuntu-core/snappy/overlord"
 	"github.com/ubuntu-core/snappy/overlord/auth"
 	"github.com/ubuntu-core/snappy/overlord/ifacestate"
@@ -155,12 +154,6 @@ var (
 )
 
 func sysInfo(c *Command, r *http.Request) Response {
-	lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-	if err != nil {
-		return InternalError("unable to acquire lock: %v", err)
-	}
-	defer lock.Unlock()
-
 	rel := release.Get()
 	m := map[string]string{
 		"flavor":          rel.Flavor,
@@ -230,6 +223,40 @@ func loginUser(c *Command, r *http.Request) Response {
 	return SyncResponse(result, nil)
 }
 
+// UserFromRequest extracts user information from request and return the respective user in state, if valid
+// It requires the state to be locked
+func UserFromRequest(st *state.State, req *http.Request) (*auth.UserState, error) {
+	// extract macaroons data from request
+	header := req.Header.Get("Authorization")
+	if header == "" {
+		return nil, errNoAuth
+	}
+
+	authorizationData := strings.SplitN(header, " ", 2)
+	if len(authorizationData) != 2 || authorizationData[0] != "Macaroon" {
+		return nil, fmt.Errorf("authorization header misses Macaroon prefix")
+	}
+
+	var macaroon string
+	var discharges []string
+	for _, field := range strings.Split(authorizationData[1], ",") {
+		field := strings.TrimSpace(field)
+		if strings.HasPrefix(field, `root="`) {
+			macaroon = strings.TrimSuffix(field[6:], `"`)
+		}
+		if strings.HasPrefix(field, `discharge="`) {
+			discharges = append(discharges, strings.TrimSuffix(field[11:], `"`))
+		}
+	}
+
+	if macaroon == "" || len(discharges) == 0 {
+		return nil, fmt.Errorf("invalid authorization header")
+	}
+
+	user, err := auth.CheckMacaroon(st, macaroon, discharges)
+	return user, err
+}
+
 type metarepo interface {
 	Snap(string, string, store.Authenticator) (*snap.Info, error)
 	FindSnaps(string, string, store.Authenticator) ([]*snap.Info, error)
@@ -238,29 +265,6 @@ type metarepo interface {
 
 var newRemoteRepo = func() metarepo {
 	return snappy.NewConfiguredUbuntuStoreSnapRepository()
-}
-
-func localSnapInfo(st *state.State, name string) (info *snap.Info, active bool, err error) {
-	st.Lock()
-	defer st.Unlock()
-
-	var snapst snapstate.SnapState
-	err = snapstate.Get(st, name, &snapst)
-	if err != nil && err != state.ErrNoState {
-		return nil, false, fmt.Errorf("cannot consult state: %v", err)
-	}
-
-	cur := snapst.Current()
-	if cur == nil {
-		return nil, false, nil
-	}
-
-	info, err = snap.ReadInfo(name, cur)
-	if err != nil {
-		return nil, false, fmt.Errorf("cannot read snap details: %v", err)
-	}
-
-	return info, snapst.Active, nil
 }
 
 var muxVars = mux.Vars
@@ -282,7 +286,12 @@ func getSnapInfo(c *Command, r *http.Request) Response {
 		channel = localSnap.Channel
 	}
 
-	remoteSnap, _ := remoteRepo.Snap(name, channel, nil)
+	auther, err := c.d.auther(r)
+	if err != nil && err != errNoAuth {
+		return InternalError("%v", err)
+	}
+
+	remoteSnap, _ := remoteRepo.Snap(name, channel, auther)
 
 	if localSnap == nil && remoteSnap == nil {
 		return NotFound("cannot find snap %q", name)
@@ -334,12 +343,6 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		return InternalError("router can't find route for snaps")
 	}
 
-	lock, err := lockfile.Lock(dirs.SnapLockFile, true)
-	if err != nil {
-		return InternalError("unable to acquire lock: %v", err)
-	}
-	defer lock.Unlock()
-
 	sources := make([]string, 0, 2)
 	query := r.URL.Query()
 
@@ -364,12 +367,12 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		includeTypes = strings.Split(query["types"][0], ",")
 	}
 
-	var localSnapMap map[string][]*snappy.Snap
+	var aboutSnaps []aboutSnap
 	var remoteSnapMap map[string]*snap.Info
 
 	if includeLocal {
 		sources = append(sources, "local")
-		localSnapMap, _ = allSnaps()
+		aboutSnaps, _ = allLocalSnapInfos(c.d.overlord.State())
 	}
 
 	var suggestedCurrency string
@@ -379,13 +382,18 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 
 		remoteRepo := newRemoteRepo()
 
+		auther, err := c.d.auther(r)
+		if err != nil && err != errNoAuth {
+			return InternalError("%v", err)
+		}
+
 		// repo.Find("") finds all
 		//
 		// TODO: Instead of ignoring the error from Find:
 		//   * if there are no results, return an error response.
 		//   * If there are results at all (perhaps local), include a
 		//     warning in the response
-		found, _ := remoteRepo.FindSnaps(searchTerm, "", nil)
+		found, _ := remoteRepo.FindSnaps(searchTerm, "", auther)
 		suggestedCurrency = remoteRepo.SuggestedCurrency()
 
 		sources = append(sources, "store")
@@ -396,7 +404,7 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 	}
 
 	seen := make(map[string]bool)
-	results := make([]*json.RawMessage, 0, len(localSnapMap)+len(remoteSnapMap))
+	results := make([]*json.RawMessage, 0, len(aboutSnaps)+len(remoteSnapMap))
 
 	addResult := func(name string, m map[string]interface{}) {
 		if seen[name] {
@@ -424,15 +432,13 @@ func getSnapsInfo(c *Command, r *http.Request) Response {
 		results = append(results, &raw)
 	}
 
-	for name, localSnaps := range localSnapMap {
-		// strings.Contains(fullname, "") is true
+	for _, about := range aboutSnaps {
+		info := about.info
+		name := info.Name()
+		// strings.Contains(name, "") is true
 		if strings.Contains(name, searchTerm) {
-			// XXX: will be cleaned up soon when allSnaps equivalent is state based
-			_, best := bestSnap(localSnaps)
-			if best == nil {
-				continue
-			}
-			addResult(name, mapSnap(best.Info(), best.IsActive(), remoteSnapMap[name]))
+			active := about.snapst.Active
+			addResult(name, mapSnap(info, active, remoteSnapMap[name]))
 		}
 	}
 
@@ -458,11 +464,6 @@ func resultHasType(r map[string]interface{}, allowedTypes []string) bool {
 		}
 	}
 	return false
-}
-
-type appDesc struct {
-	Op   string          `json:"op"`
-	Spec *snappy.AppYaml `json:"spec"`
 }
 
 // licenseData holds details about the snap license, and may be
@@ -703,7 +704,7 @@ func (inst *snapInstruction) dispatch() func() (*state.Change, error) {
 	switch inst.Action {
 	case "install":
 		return inst.install
-	case "update":
+	case "refresh":
 		return inst.update
 	case "remove":
 		return inst.remove
@@ -826,9 +827,13 @@ func sideloadSnap(c *Command, r *http.Request) Response {
 	state.Lock()
 	msg := fmt.Sprintf(i18n.G("Install local %q snap"), snap)
 	chg := state.NewChange("install-snap", msg)
-	ts, err := snapstateInstallPath(state, snap, "", flags)
+
+	err = ensureUbuntuCore(chg)
 	if err == nil {
-		chg.AddAll(ts)
+		ts, err := snapstateInstallPath(state, snap, "", flags)
+		if err == nil {
+			chg.AddAll(ts)
+		}
 	}
 	state.Unlock()
 	go func() {
@@ -923,60 +928,43 @@ func changeInterfaces(c *Command, r *http.Request) Response {
 	if len(a.Plugs) > 1 || len(a.Slots) > 1 {
 		return NotImplemented("many-to-many operations are not implemented")
 	}
+	if a.Action != "connect" && a.Action != "disconnect" {
+		return BadRequest("unsupported interface action: %q", a.Action)
+	}
+	if len(a.Plugs) == 0 || len(a.Slots) == 0 {
+		return BadRequest("at least one plug and slot is required")
+	}
+
+	var change *state.Change
+	var taskset *state.TaskSet
+	var err error
 
 	state := c.d.overlord.State()
+	state.Lock()
+	defer state.Unlock()
 
 	switch a.Action {
 	case "connect":
-		if len(a.Plugs) == 0 || len(a.Slots) == 0 {
-			return BadRequest("at least one plug and slot is required")
-		}
 		summary := fmt.Sprintf("Connect %s:%s to %s:%s", a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
-		state.Lock()
-		change := state.NewChange("connect-snap", summary)
-		taskset, err := ifacestate.Connect(
-			state, a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
-		if err == nil {
-			change.AddAll(taskset)
-		}
-		state.Unlock()
-		if err != nil {
-			return BadRequest("%v", err)
-		}
-
-		state.EnsureBefore(0)
-		err = waitChange(change)
-
-		if err != nil {
-			return BadRequest("%v", err)
-		}
-		return SyncResponse(nil, nil)
+		change = state.NewChange("connect-snap", summary)
+		taskset, err = ifacestate.Connect(state, a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
 	case "disconnect":
-		if len(a.Plugs) == 0 || len(a.Slots) == 0 {
-			return BadRequest("at least one plug and slot is required")
-		}
 		summary := fmt.Sprintf("Disconnect %s:%s from %s:%s", a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
-		state.Lock()
-		change := state.NewChange("disconnect-snap", summary)
-		taskset, err := ifacestate.Disconnect(state,
-			a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
-		if err == nil {
-			change.AddAll(taskset)
-		}
-		state.Unlock()
-		if err != nil {
-			return BadRequest("%v", err)
-		}
-
-		state.EnsureBefore(0)
-		err = waitChange(change)
-
-		if err != nil {
-			return BadRequest("%v", err)
-		}
-		return SyncResponse(nil, nil)
+		change = state.NewChange("disconnect-snap", summary)
+		taskset, err = ifacestate.Disconnect(state, a.Plugs[0].Snap, a.Plugs[0].Name, a.Slots[0].Snap, a.Slots[0].Name)
 	}
-	return BadRequest("unsupported interface action: %q", a.Action)
+
+	if err == nil {
+		change.AddAll(taskset)
+	}
+
+	if err != nil {
+		return BadRequest("%v", err)
+	}
+
+	state.EnsureBefore(0)
+
+	return AsyncResponse(nil, &Meta{Change: change.ID()})
 }
 
 func doAssert(c *Command, r *http.Request) Response {

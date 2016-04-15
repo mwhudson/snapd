@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/ubuntu-core/snappy/overlord/state"
 )
@@ -35,10 +36,12 @@ type AuthState struct {
 
 // UserState represents an authenticated user
 type UserState struct {
-	ID         int      `json:"id"`
-	Username   string   `json:"username,omitempty"`
-	Macaroon   string   `json:"macaroon,omitempty"`
-	Discharges []string `json:"discharges,omitempty"`
+	ID              int      `json:"id"`
+	Username        string   `json:"username,omitempty"`
+	Macaroon        string   `json:"macaroon,omitempty"`
+	Discharges      []string `json:"discharges,omitempty"`
+	StoreMacaroon   string   `json:"store-macaroon,omitempty"`
+	StoreDischarges []string `json:"store-discharges,omitempty"`
 }
 
 // NewUser tracks a new authenticated user and saves its details in the state
@@ -52,12 +55,15 @@ func NewUser(st *state.State, username, macaroon string, discharges []string) (*
 		return nil, err
 	}
 
+	sort.Strings(discharges)
 	authStateData.LastID++
 	authenticatedUser := UserState{
-		ID:         authStateData.LastID,
-		Username:   username,
-		Macaroon:   macaroon,
-		Discharges: discharges,
+		ID:              authStateData.LastID,
+		Username:        username,
+		Macaroon:        macaroon,
+		Discharges:      discharges,
+		StoreMacaroon:   macaroon,
+		StoreDischarges: discharges,
 	}
 	authStateData.Users = append(authStateData.Users, authenticatedUser)
 
@@ -84,9 +90,37 @@ func User(st *state.State, id int) (*UserState, error) {
 	return nil, fmt.Errorf("invalid user")
 }
 
+// CheckMacaroon returns the UserState for the given macaroon/discharges credentials
+func CheckMacaroon(st *state.State, macaroon string, discharges []string) (*UserState, error) {
+	var authStateData AuthState
+	err := st.Get("auth", &authStateData)
+	if err != nil {
+		return nil, nil
+	}
+
+NextUser:
+	for _, user := range authStateData.Users {
+		if user.Macaroon != macaroon {
+			continue
+		}
+		if len(user.Discharges) != len(discharges) {
+			continue
+		}
+		// sort discharges (stored users' discharges are already sorted)
+		sort.Strings(discharges)
+		for i, d := range user.Discharges {
+			if d != discharges[i] {
+				continue NextUser
+			}
+		}
+		return &user, nil
+	}
+	return nil, fmt.Errorf("invalid authentication")
+}
+
 // Authenticator returns MacaroonAuthenticator for current authenticated user represented by UserState
 func (us *UserState) Authenticator() *MacaroonAuthenticator {
-	return newMacaroonAuthenticator(us.Macaroon, us.Discharges)
+	return newMacaroonAuthenticator(us.StoreMacaroon, us.StoreDischarges)
 }
 
 // MacaroonAuthenticator is a store authenticator based on macaroons

@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ubuntu-core/snappy/arch"
@@ -51,6 +52,10 @@ func CheckSnap(snapFilePath string, curInfo *snap.Info, flags InstallFlags, mete
 	s, snapf, err := openSnapFile(snapFilePath, allowUnauth, nil)
 	if err != nil {
 		return err
+	}
+
+	if len(s.Assumes) > 0 {
+		return fmt.Errorf("snap %q assumes unsupported features: %s (try new ubuntu-core)", s.Name(), strings.Join(s.Assumes, ", "))
 	}
 
 	// we do not security Verify() (check hashes) the package here.
@@ -82,13 +87,6 @@ func SetupSnap(snapFilePath string, sideInfo *snap.SideInfo, flags InstallFlags,
 	if err := os.MkdirAll(instdir, 0755); err != nil {
 		logger.Noticef("Can not create %q: %v", instdir, err)
 		return s, err
-	}
-
-	// XXX: do this here as long as we are manifest based
-	if s.Revision != 0 { // not sideloaded
-		if err := SaveManifest(s); err != nil {
-			return s, err
-		}
 	}
 
 	if err := snapf.Install(s.MountFile(), instdir); err != nil {
@@ -413,7 +411,14 @@ func (o *Overlord) InstallWithSideInfo(snapFilePath string, sideInfo *snap.SideI
 		return nil, err
 	}
 
-	// we need this for later
+	// XXX: this is still done for now for this legacy Install to
+	// keep unit tests as they are working and as strawman
+	// behavior for current u-d-f
+	if newInfo.Revision != 0 { // not sideloaded
+		if err := SaveManifest(newInfo); err != nil {
+			return nil, err
+		}
+	}
 
 	if oldInfo != nil {
 		// we need to stop any services and make the commands unavailable
@@ -626,7 +631,7 @@ func (o *Overlord) SetActive(s *Snap, active bool, meter progress.Meter) error {
 //
 // It returns an error on failure
 func (o *Overlord) Configure(s *Snap, configuration []byte) ([]byte, error) {
-	if s.m.Type == snap.TypeOS {
+	if s.Type() == snap.TypeOS {
 		return coreConfig(configuration)
 	}
 

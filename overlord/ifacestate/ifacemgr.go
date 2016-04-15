@@ -63,8 +63,9 @@ func Manager(s *state.State, extra []interfaces.Interface) (*InterfaceManager, e
 	}
 	runner.AddHandler("connect", m.doConnect, nil)
 	runner.AddHandler("disconnect", m.doDisconnect, nil)
-	runner.AddHandler("setup-snap-security", m.doSetupSnapSecurity, m.doRemoveSnapSecurity)
-	runner.AddHandler("remove-snap-security", m.doRemoveSnapSecurity, m.doSetupSnapSecurity)
+	runner.AddHandler("setup-profiles", m.doSetupProfiles, m.doRemoveProfiles)
+	runner.AddHandler("remove-profiles", m.doRemoveProfiles, m.doSetupProfiles)
+	runner.AddHandler("discard-conns", m.doDiscardConns, m.undoDiscardConns)
 	return m, nil
 }
 
@@ -144,7 +145,7 @@ func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, repo *interfaces.R
 		return err
 	}
 	for _, backend := range securityBackends {
-		if err := backend.Setup(snapInfo, snapState.DevMode, repo); err != nil {
+		if err := backend.Setup(snapInfo, snapState.DevMode(), repo); err != nil {
 			task.Errorf("cannot setup %s for snap %q: %s", backend.Name(), snapName, err)
 			return err
 		}
@@ -152,7 +153,17 @@ func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, repo *interfaces.R
 	return nil
 }
 
-func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) error {
+func removeSnapSecurity(task *state.Task, snapName string) error {
+	for _, backend := range securityBackends {
+		if err := backend.Remove(snapName); err != nil {
+			task.Errorf("cannot setup %s for snap %q: %s", backend.Name(), snapName, err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *InterfaceManager) doSetupProfiles(task *state.Task, _ *tomb.Tomb) error {
 	task.State().Lock()
 	defer task.State().Unlock()
 
@@ -177,6 +188,7 @@ func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) e
 	// - restore connections based on what is kept in the state
 	//   - if a connection cannot be restored then remove it from the state
 	// - setup the security of all the affected snaps
+	blacklist := m.repo.AutoConnectBlacklist(snapName)
 	affectedSnaps, err := m.repo.DisconnectSnap(snapName)
 	if err != nil {
 		return err
@@ -196,7 +208,7 @@ func (m *InterfaceManager) doSetupSnapSecurity(task *state.Task, _ *tomb.Tomb) e
 	if err := m.reloadConnections(snapName); err != nil {
 		return err
 	}
-	if err := m.autoConnect(task, snapName); err != nil {
+	if err := m.autoConnect(task, snapName, blacklist); err != nil {
 		return err
 	}
 	if len(affectedSnaps) == 0 {
@@ -234,7 +246,7 @@ func parseConnID(conn string) (*interfaces.PlugRef, *interfaces.SlotRef, error) 
 	return plugRef, slotRef, nil
 }
 
-func (m *InterfaceManager) autoConnect(task *state.Task, snapName string) error {
+func (m *InterfaceManager) autoConnect(task *state.Task, snapName string, blacklist map[string]bool) error {
 	var conns map[string]connState
 	err := task.State().Get("conns", &conns)
 	if err != nil && err != state.ErrNoState {
@@ -245,6 +257,9 @@ func (m *InterfaceManager) autoConnect(task *state.Task, snapName string) error 
 	}
 	// XXX: quick hack, auto-connect everything
 	for _, plug := range m.repo.Plugs(snapName) {
+		if blacklist[plug.Name] {
+			continue
+		}
 		candidates := m.repo.AutoConnectCandidates(snapName, plug.Name)
 		if len(candidates) != 1 {
 			continue
@@ -261,39 +276,101 @@ func (m *InterfaceManager) autoConnect(task *state.Task, snapName string) error 
 	return nil
 }
 
-func (m *InterfaceManager) doRemoveSnapSecurity(task *state.Task, _ *tomb.Tomb) error {
+func (m *InterfaceManager) doRemoveProfiles(task *state.Task, _ *tomb.Tomb) error {
 	task.State().Lock()
 	defer task.State().Unlock()
 
-	// Get snap.Info from bits handed by the snap manager.
-	ss, err := snapstate.TaskSnapSetup(task)
+	snapSetup, err := snapstate.TaskSnapSetup(task)
 	if err != nil {
 		return err
 	}
-	snapInfo, err := snapstate.Info(task.State(), ss.Name, ss.Revision)
-	if err != nil {
-		return err
-	}
-	snapName := snapInfo.Name()
+	snapName := snapSetup.Name
+
 	affectedSnaps, err := m.repo.DisconnectSnap(snapName)
 	if err != nil {
 		return err
 	}
-	// TODO: remove all connections from the state
-	if err := m.repo.RemoveSnap(snapName); err != nil {
-
-		return err
-	}
-	if len(affectedSnaps) == 0 {
-		affectedSnaps = append(affectedSnaps, snapInfo)
-	}
 	for _, snapInfo := range affectedSnaps {
-		for _, backend := range securityBackends {
-			if err := backend.Remove(snapInfo.Name()); err != nil {
-				return state.Retry
-			}
+		if snapInfo.Name() == snapName {
+			continue
+		}
+		if err := setupSnapSecurity(task, snapInfo, m.repo); err != nil {
+			return state.Retry
 		}
 	}
+
+	if err := m.repo.RemoveSnap(snapName); err != nil {
+		return err
+	}
+	if err := removeSnapSecurity(task, snapName); err != nil {
+		return state.Retry
+	}
+
+	return nil
+}
+
+func (m *InterfaceManager) doDiscardConns(task *state.Task, _ *tomb.Tomb) error {
+	st := task.State()
+	st.Lock()
+	defer st.Unlock()
+
+	snapSetup, err := snapstate.TaskSnapSetup(task)
+	if err != nil {
+		return err
+	}
+
+	snapName := snapSetup.Name
+
+	var snapState snapstate.SnapState
+	err = snapstate.Get(st, snapName, &snapState)
+	if err != nil && err != state.ErrNoState {
+		return err
+	}
+
+	if err == nil && len(snapState.Sequence) != 0 {
+		return fmt.Errorf("cannot discard connections for snap %q while it is present", snapName)
+	}
+	conns, err := getConns(st)
+	if err != nil {
+		return err
+	}
+	removed := make(map[string]connState)
+	for id := range conns {
+		plugRef, slotRef, err := parseConnID(id)
+		if err != nil {
+			return err
+		}
+		if plugRef.Snap == snapName || slotRef.Snap == snapName {
+			removed[id] = conns[id]
+			delete(conns, id)
+		}
+	}
+	task.Set("removed", removed)
+	setConns(st, conns)
+	return nil
+}
+
+func (m *InterfaceManager) undoDiscardConns(task *state.Task, _ *tomb.Tomb) error {
+	st := task.State()
+	st.Lock()
+	defer st.Unlock()
+
+	var removed map[string]connState
+	err := task.Get("removed", &removed)
+	if err != nil && err != state.ErrNoState {
+		return err
+	}
+
+	conns, err := getConns(st)
+	if err != nil {
+		return err
+	}
+
+	for id, connState := range removed {
+		conns[id] = connState
+	}
+	setConns(st, conns)
+	task.Set("removed", nil)
 	return nil
 }
 

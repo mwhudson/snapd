@@ -58,7 +58,7 @@ func (f *fakeSnappyBackend) InstallLocal(path string, flags int, p progress.Mete
 	return nil
 }
 
-func (f *fakeSnappyBackend) Download(name, channel string, p progress.Meter, auther store.Authenticator) (*snap.Info, string, error) {
+func (f *fakeSnappyBackend) Download(name, channel string, checker func(*snap.Info) error, p progress.Meter, auther store.Authenticator) (*snap.Info, string, error) {
 	f.ops = append(f.ops, fakeOp{
 		op:      "download",
 		name:    name,
@@ -67,26 +67,27 @@ func (f *fakeSnappyBackend) Download(name, channel string, p progress.Meter, aut
 	p.SetTotal(float64(f.fakeTotalProgress))
 	p.Set(float64(f.fakeCurrentProgress))
 
+	revno := 11
+	if channel == "channel-for-7" {
+		revno = 7
+	}
+
 	info := &snap.Info{
 		SideInfo: snap.SideInfo{
 			OfficialName: strings.Split(name, ".")[0],
 			Channel:      channel,
 			SnapID:       "snapIDsnapidsnapidsnapidsnapidsn",
-			Revision:     11,
+			Revision:     revno,
 		},
 		Version: name,
 	}
 
-	return info, "downloaded-snap-path", nil
-}
+	err := checker(info)
+	if err != nil {
+		return nil, "", err
+	}
 
-func (f *fakeSnappyBackend) Activate(name string, active bool, p progress.Meter) error {
-	f.ops = append(f.ops, fakeOp{
-		op:     "activate",
-		name:   name,
-		active: active,
-	})
-	return nil
+	return info, "downloaded-snap-path", nil
 }
 
 func (f *fakeSnappyBackend) CheckSnap(snapFilePath string, curInfo *snap.Info, flags int) error {
@@ -119,7 +120,7 @@ func (f *fakeSnappyBackend) SetupSnap(snapFilePath string, si *snap.SideInfo, fl
 
 func (f *fakeSnappyBackend) ReadInfo(name string, si *snap.SideInfo) (*snap.Info, error) {
 	// naive emulation for now, always works
-	return &snap.Info{SideInfo: *si}, nil
+	return &snap.Info{SuggestedName: name, SideInfo: *si}, nil
 }
 
 func (f *fakeSnappyBackend) CopySnapData(newInfo, oldInfo *snap.Info, flags int) error {
