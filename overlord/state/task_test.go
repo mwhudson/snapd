@@ -27,6 +27,7 @@ import (
 
 	"github.com/ubuntu-core/snappy/overlord/state"
 	"github.com/ubuntu-core/snappy/testutil"
+	"time"
 )
 
 type taskSuite struct{}
@@ -42,6 +43,28 @@ func (ts *taskSuite) TestNewTask(c *C) {
 
 	c.Check(t.Kind(), Equals, "download")
 	c.Check(t.Summary(), Equals, "1...")
+}
+
+func (cs *taskSuite) TestReadyTime(c *C) {
+	st := state.New(nil)
+	st.Lock()
+	defer st.Unlock()
+
+	task := st.NewTask("download", "summary...")
+
+	now := time.Now()
+
+	t := task.SpawnTime()
+	c.Check(t.After(now.Add(-5*time.Second)), Equals, true)
+	c.Check(t.Before(now.Add(5*time.Second)), Equals, true)
+
+	c.Check(task.ReadyTime().IsZero(), Equals, true)
+
+	task.SetStatus(state.DoneStatus)
+
+	t = task.ReadyTime()
+	c.Check(t.After(now.Add(-5*time.Second)), Equals, true)
+	c.Check(t.Before(now.Add(5*time.Second)), Equals, true)
 }
 
 func (ts *taskSuite) TestGetSet(c *C) {
@@ -203,7 +226,7 @@ func (cs *taskSuite) TestLogf(c *C) {
 	log := t.Log()
 	c.Assert(log, HasLen, 10)
 	for i := 0; i < 10; i++ {
-		c.Assert(log[i], Equals, fmt.Sprintf("INFO: Message #%d", i+10))
+		c.Assert(log[i], Matches, fmt.Sprintf("....-..-..T.* INFO Message #%d", i+10))
 	}
 }
 
@@ -215,7 +238,7 @@ func (cs *taskSuite) TestErrorf(c *C) {
 	t := st.NewTask("download", "1...")
 
 	t.Errorf("Some %s", "error")
-	c.Assert(t.Log(), DeepEquals, []string{"ERROR: Some error"})
+	c.Assert(t.Log()[0], Matches, "....-..-..T.* ERROR Some error")
 }
 
 func (ts *taskSuite) TestTaskMarshalsLog(c *C) {
@@ -229,7 +252,7 @@ func (ts *taskSuite) TestTaskMarshalsLog(c *C) {
 	d, err := t.MarshalJSON()
 	c.Assert(err, IsNil)
 
-	c.Assert(string(d), testutil.Contains, `"log":["INFO: foo"]`)
+	c.Assert(string(d), Matches, `.*"log":\["....-..-..T.* INFO foo"\].*`)
 }
 
 // TODO: Better testing of full task roundtripping via JSON.

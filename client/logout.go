@@ -1,7 +1,7 @@
 // -*- Mode: Go; indent-tabs-mode: t -*-
 
 /*
- * Copyright (C) 2015 Canonical Ltd
+ * Copyright (C) 2016 Canonical Ltd
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -19,24 +19,8 @@
 
 package client
 
-import (
-	"io"
-	"net/url"
-)
-
-// SetDoer sets the client's doer to the given one
-func (client *Client) SetDoer(d doer) {
-	client.doer = d
+// Logout logs the user out
+func (client *Client) Logout() error {
+	_, err := client.doSync("POST", "/v2/logout", nil, nil, nil, nil)
+	return err
 }
-
-// Do does do.
-func (client *Client) Do(method, path string, query url.Values, body io.Reader, v interface{}) error {
-	return client.do(method, path, query, nil, body, v)
-}
-
-// expose parseError for testing
-var ParseErrorInTest = parseError
-
-// expose read and write auth helpers for testing
-var TestWriteAuth = writeAuthData
-var TestReadAuth = readAuthData

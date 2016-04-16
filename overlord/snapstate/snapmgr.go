@@ -25,8 +25,11 @@ import (
 
 	"gopkg.in/tomb.v2"
 
+	"github.com/ubuntu-core/snappy/overlord/auth"
 	"github.com/ubuntu-core/snappy/overlord/state"
 	"github.com/ubuntu-core/snappy/snap"
+	"github.com/ubuntu-core/snappy/snappy"
+	"github.com/ubuntu-core/snappy/store"
 )
 
 // SnapManager is responsible for the installation and removal of snaps.
@@ -42,6 +45,7 @@ type SnapSetup struct {
 	Name     string `json:"name"`
 	Revision int    `json:"revision,omitempty"`
 	Channel  string `json:"channel,omitempty"`
+	UserID   int    `json:"user-id,omitempty"`
 
 	Flags int `json:"flags,omitempty"`
 
@@ -54,6 +58,10 @@ func (ss *SnapSetup) placeInfo() snap.PlaceInfo {
 
 func (ss *SnapSetup) MountDir() string {
 	return snap.MountDir(ss.Name, ss.Revision)
+}
+
+func (ss *SnapSetup) DevMode() bool {
+	return ss.Flags&int(snappy.DeveloperMode) != 0
 }
 
 // SnapStateFlags are flags stored in SnapState.
@@ -205,7 +213,19 @@ func (m *SnapManager) doDownloadSnap(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	pb := &TaskProgressAdapter{task: t}
-	storeInfo, downloadedSnapFile, err := m.backend.Download(ss.Name, ss.Channel, checker, pb, nil)
+
+	var auther store.Authenticator
+	if ss.UserID > 0 {
+		st.Lock()
+		user, err := auth.User(st, ss.UserID)
+		st.Unlock()
+		if err != nil {
+			return err
+		}
+		auther = user.Authenticator()
+	}
+
+	storeInfo, downloadedSnapFile, err := m.backend.Download(ss.Name, ss.Channel, checker, pb, auther)
 	if err != nil {
 		return err
 	}
@@ -227,9 +247,6 @@ func (m *SnapManager) doUnlinkSnap(t *state.Task, _ *tomb.Tomb) error {
 
 	st := t.State()
 
-	// Hold the lock for the full duration of the task here so
-	// nobody observes a world where the state engine and
-	// the file system are reporting different things.
 	st.Lock()
 	defer st.Unlock()
 
@@ -244,7 +261,9 @@ func (m *SnapManager) doUnlinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	pb := &TaskProgressAdapter{task: t}
+	st.Unlock() // pb itself will ask for locking
 	err = m.backend.UnlinkSnap(info, pb)
+	st.Lock()
 	if err != nil {
 		return err
 	}
@@ -283,7 +302,6 @@ func (m *SnapManager) doDiscardSnap(t *state.Task, _ *tomb.Tomb) error {
 		return err
 	}
 
-	st.Lock()
 	if len(snapst.Sequence) == 1 {
 		snapst.Sequence = nil
 	} else {
@@ -297,7 +315,6 @@ func (m *SnapManager) doDiscardSnap(t *state.Task, _ *tomb.Tomb) error {
 		}
 		snapst.Sequence = newSeq
 	}
-	st.Unlock()
 
 	pb := &TaskProgressAdapter{task: t}
 	err = m.backend.RemoveSnapFiles(ss.placeInfo(), pb)
@@ -405,9 +422,6 @@ func (m *SnapManager) doMountSnap(t *state.Task, _ *tomb.Tomb) error {
 func (m *SnapManager) undoUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 	st := t.State()
 
-	// Hold the lock for the full duration of the task here so
-	// nobody observes a world where the state engine and
-	// the file system are reporting different things.
 	st.Lock()
 	defer st.Unlock()
 
@@ -422,7 +436,9 @@ func (m *SnapManager) undoUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	snapst.Active = true
+	st.Unlock()
 	err = m.backend.LinkSnap(oldInfo)
+	st.Lock()
 	if err != nil {
 		return err
 	}
@@ -436,9 +452,6 @@ func (m *SnapManager) undoUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 func (m *SnapManager) doUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 	st := t.State()
 
-	// Hold the lock for the full duration of the task here so
-	// nobody observes a world where the state engine and
-	// the file system are reporting different things.
 	st.Lock()
 	defer st.Unlock()
 
@@ -455,7 +468,9 @@ func (m *SnapManager) doUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 	snapst.Active = false
 
 	pb := &TaskProgressAdapter{task: t}
+	st.Unlock() // pb itself will ask for locking
 	err = m.backend.UnlinkSnap(oldInfo, pb)
+	st.Lock()
 	if err != nil {
 		return err
 	}
@@ -510,9 +525,6 @@ func (m *SnapManager) doCopySnapData(t *state.Task, _ *tomb.Tomb) error {
 func (m *SnapManager) doLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	st := t.State()
 
-	// Hold the lock for the full duration of the task here so
-	// nobody observes a world where the state engine and
-	// the file system are reporting different things.
 	st.Lock()
 	defer st.Unlock()
 
@@ -527,17 +539,24 @@ func (m *SnapManager) doLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	snapst.Sequence = append(snapst.Sequence, snapst.Candidate)
 	snapst.Candidate = nil
 	snapst.Active = true
+	oldChannel := snapst.Channel
+	if ss.Channel != "" {
+		snapst.Channel = ss.Channel
+	}
 
 	newInfo, err := readInfo(ss.Name, cand)
 	if err != nil {
 		return err
 	}
 
+	st.Unlock()
 	err = m.backend.LinkSnap(newInfo)
+	st.Lock()
 	if err != nil {
 		return err
 	}
 
+	t.Set("old-channel", oldChannel)
 	// Do at the end so we only preserve the new state if it worked.
 	Set(st, ss.Name, snapst)
 	return nil
@@ -546,13 +565,16 @@ func (m *SnapManager) doLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 func (m *SnapManager) undoLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	st := t.State()
 
-	// Hold the lock for the full duration of the task here so
-	// nobody observes a world where the state engine and
-	// the file system are reporting different things.
 	st.Lock()
 	defer st.Unlock()
 
 	ss, snapst, err := snapSetupAndState(t)
+	if err != nil {
+		return err
+	}
+
+	var oldChannel string
+	err = t.Get("old-channel", &oldChannel)
 	if err != nil {
 		return err
 	}
@@ -562,6 +584,7 @@ func (m *SnapManager) undoLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	snapst.Candidate = snapst.Sequence[len(snapst.Sequence)-1]
 	snapst.Sequence = snapst.Sequence[:len(snapst.Sequence)-1]
 	snapst.Active = false
+	snapst.Channel = oldChannel
 
 	newInfo, err := readInfo(ss.Name, snapst.Candidate)
 	if err != nil {
@@ -569,7 +592,9 @@ func (m *SnapManager) undoLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	pb := &TaskProgressAdapter{task: t}
+	st.Unlock() // pb itself will ask for locking
 	err = m.backend.UnlinkSnap(newInfo, pb)
+	st.Lock()
 	if err != nil {
 		return err
 	}

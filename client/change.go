@@ -20,8 +20,11 @@
 package client
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"time"
 )
 
 // A Change is a modification to the system state.
@@ -33,6 +36,9 @@ type Change struct {
 	Tasks   []*Task `json:"tasks,omitempty"`
 	Ready   bool    `json:"ready"`
 	Err     string  `json:"err,omitempty"`
+
+	SpawnTime time.Time `json:"spawn-time,omitempty"`
+	ReadyTime time.Time `json:"ready-time,omitempty"`
 }
 
 // A Task is an operation done to change the system's state.
@@ -43,6 +49,9 @@ type Task struct {
 	Status   string       `json:"status"`
 	Log      []string     `json:"log,omitempty"`
 	Progress TaskProgress `json:"progress"`
+
+	SpawnTime time.Time `json:"spawn-time,omitempty"`
+	ReadyTime time.Time `json:"ready-time,omitempty"`
 }
 
 type TaskProgress struct {
@@ -53,9 +62,29 @@ type TaskProgress struct {
 // Change fetches information about a Change given its ID
 func (client *Client) Change(id string) (*Change, error) {
 	var chg Change
-	_, err := client.doSync("GET", "/v2/changes/"+id, nil, nil, &chg)
+	_, err := client.doSync("GET", "/v2/changes/"+id, nil, nil, nil, &chg)
 
 	return &chg, err
+}
+
+// Abort attempts to abort a change that is in not yet ready.
+func (client *Client) Abort(id string) (*Change, error) {
+	var postData struct {
+		Action string `json:"action"`
+	}
+	postData.Action = "abort"
+
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(postData); err != nil {
+		return nil, err
+	}
+
+	var chg Change
+	if _, err := client.doSync("POST", "/v2/changes/"+id, nil, nil, &body, &chg); err != nil {
+		return nil, err
+	}
+
+	return &chg, nil
 }
 
 type ChangeSelector uint8
@@ -84,7 +113,7 @@ func (client *Client) Changes(which ChangeSelector) ([]*Change, error) {
 	query.Set("select", which.String())
 
 	var chgs []*Change
-	_, err := client.doSync("GET", "/v2/changes", query, nil, &chgs)
+	_, err := client.doSync("GET", "/v2/changes", query, nil, nil, &chgs)
 
 	return chgs, err
 }

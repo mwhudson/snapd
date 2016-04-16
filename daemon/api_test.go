@@ -259,7 +259,7 @@ func (s *apiSuite) TestSnapInfoOneIntegration(c *check.C) {
 	// and v1 [r10] is current
 	s.mkInstalledInState(c, d, "foo", "bar", "v1", 10, true, "")
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	rsp, ok := getSnapInfo(snapCmd, req).(*resp)
 	c.Assert(ok, check.Equals, true)
@@ -315,7 +315,7 @@ func (s *apiSuite) TestSnapInfoWithAuth(c *check.C) {
 	state.Unlock()
 	c.Check(err, check.IsNil)
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Authorization", `Macaroon root="macaroon", discharge="discharge"`)
 
@@ -331,7 +331,7 @@ func (s *apiSuite) TestSnapInfoNotFound(c *check.C) {
 	s.vars = map[string]string{"name": "foo"}
 	s.err = snappy.ErrPackageNotFound
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	c.Check(getSnapInfo(snapCmd, req).Self(nil, nil).(*resp).Status, check.Equals, http.StatusNotFound)
 }
@@ -339,7 +339,7 @@ func (s *apiSuite) TestSnapInfoNotFound(c *check.C) {
 func (s *apiSuite) TestSnapInfoNoneFound(c *check.C) {
 	s.vars = map[string]string{"name": "foo"}
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	c.Check(getSnapInfo(snapCmd, req).Self(nil, nil).(*resp).Status, check.Equals, http.StatusNotFound)
 }
@@ -348,7 +348,7 @@ func (s *apiSuite) TestSnapInfoIgnoresRemoteErrors(c *check.C) {
 	s.vars = map[string]string{"name": "foo"}
 	s.err = errors.New("weird")
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	rsp := getSnapInfo(snapCmd, req).Self(nil, nil).(*resp)
 
@@ -370,7 +370,7 @@ func (s *apiSuite) TestSnapInfoWeirdRoute(c *check.C) {
 			OfficialName: "foo",
 		},
 	}}
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	c.Check(getSnapInfo(wrongCmd, req).Self(nil, nil).(*resp).Status, check.Equals, http.StatusInternalServerError)
 }
@@ -391,7 +391,7 @@ func (s *apiSuite) TestSnapInfoBadRoute(c *check.C) {
 		},
 	}}
 
-	req, err := http.NewRequest("GET", "/v2/snap/foo", nil)
+	req, err := http.NewRequest("GET", "/v2/snaps/gfoo", nil)
 	c.Assert(err, check.IsNil)
 	rsp := getSnapInfo(snapCmd, req).Self(nil, nil).(*resp)
 
@@ -430,7 +430,6 @@ func (s *apiSuite) TestListIncludesAll(c *check.C) {
 	})
 
 	exceptions := []string{ // keep sorted, for scanning ease
-		"apiCompatLevel",
 		"api",
 		"maxReadBuflen",
 		"muxVars",
@@ -438,6 +437,7 @@ func (s *apiSuite) TestListIncludesAll(c *check.C) {
 		"pkgActionDispatch",
 		// snapInstruction vars:
 		"snapstateInstall",
+		"snapstateUpdate",
 		"snapstateInstallPath",
 		"snapstateGet",
 	}
@@ -469,9 +469,8 @@ func (s *apiSuite) TestRootCmd(c *check.C) {
 func (s *apiSuite) mkrelease() {
 	// set up release
 	release.Override(release.Release{
-		Flavor:  "flavor",
-		Series:  "release",
-		Channel: "channel",
+		Flavor: "flavor",
+		Series: "series",
 	})
 }
 
@@ -492,10 +491,8 @@ func (s *apiSuite) TestSysInfo(c *check.C) {
 	c.Check(rec.HeaderMap.Get("Content-Type"), check.Equals, "application/json")
 
 	expected := map[string]interface{}{
-		"flavor":          "flavor",
-		"release":         "release",
-		"default-channel": "channel",
-		"api-compat":      apiCompatLevel,
+		"flavor": "flavor",
+		"series": "series",
 	}
 	var rsp resp
 	c.Assert(json.Unmarshal(rec.Body.Bytes(), &rsp), check.IsNil)
@@ -515,11 +512,9 @@ func (s *apiSuite) TestSysInfoStore(c *check.C) {
 	c.Check(rec.Code, check.Equals, 200)
 
 	expected := map[string]interface{}{
-		"flavor":          "flavor",
-		"release":         "release",
-		"default-channel": "channel",
-		"api-compat":      apiCompatLevel,
-		"store":           "some-store",
+		"flavor": "flavor",
+		"series": "series",
+		"store":  "some-store",
 	}
 	var rsp resp
 	c.Assert(json.Unmarshal(rec.Body.Bytes(), &rsp), check.IsNil)
@@ -567,6 +562,7 @@ func (s *apiSuite) TestLoginUser(c *check.C) {
 	}
 	c.Check(rsp.Status, check.Equals, 200)
 	c.Check(rsp.Type, check.Equals, ResponseTypeSync)
+	c.Assert(rsp.Result, check.FitsTypeOf, expected)
 	c.Check(rsp.Result, check.DeepEquals, expected)
 
 	expectedUser := auth.UserState{
@@ -584,6 +580,28 @@ func (s *apiSuite) TestLoginUser(c *check.C) {
 	state.Unlock()
 	c.Check(err, check.IsNil)
 	c.Check(*user, check.DeepEquals, expectedUser)
+}
+
+func (s *apiSuite) TestLogoutUser(c *check.C) {
+	d := s.daemon(c)
+	state := d.overlord.State()
+	state.Lock()
+	user, err := auth.NewUser(state, "username", "macaroon", []string{"discharge"})
+	state.Unlock()
+	c.Assert(err, check.IsNil)
+
+	req, err := http.NewRequest("POST", "/v2/logout", nil)
+	c.Assert(err, check.IsNil)
+	req.Header.Set("Authorization", `Macaroon root="macaroon", discharge="discharge"`)
+
+	rsp := logoutUser(logoutCmd, req).(*resp)
+	c.Check(rsp.Status, check.Equals, 200)
+	c.Check(rsp.Type, check.Equals, ResponseTypeSync)
+
+	state.Lock()
+	_, err = auth.User(state, user.ID)
+	state.Unlock()
+	c.Check(err, check.ErrorMatches, "invalid user")
 }
 
 func (s *apiSuite) TestLoginUserBadRequest(c *check.C) {
@@ -1053,6 +1071,47 @@ func (s *apiSuite) TestPostSnap(c *check.C) {
 	st.Unlock()
 }
 
+func (s *apiSuite) TestPostSnapSetsUser(c *check.C) {
+	d := s.daemon(c)
+
+	pkgActionDispatch = func(inst *snapInstruction) func() (*state.Change, error) {
+		return func() (*state.Change, error) {
+			state := d.overlord.State()
+			state.Lock()
+			// check UserID was set in the snapInstruction
+			chg := state.NewChange("foo", string(inst.userID))
+			state.Unlock()
+
+			return chg, nil
+		}
+	}
+	defer func() {
+		pkgActionDispatch = pkgActionDispatchImpl
+	}()
+
+	state := snapCmd.d.overlord.State()
+	state.Lock()
+	user, err := auth.NewUser(state, "username", "macaroon", []string{"discharge"})
+	state.Unlock()
+	c.Check(err, check.IsNil)
+
+	buf := bytes.NewBufferString(`{"action": "install"}`)
+	req, err := http.NewRequest("POST", "/v2/snaps/hello-world", buf)
+	c.Assert(err, check.IsNil)
+	req.Header.Set("Authorization", `Macaroon root="macaroon", discharge="discharge"`)
+
+	rsp := postSnap(snapCmd, req).(*resp)
+
+	c.Check(rsp.Type, check.Equals, ResponseTypeAsync)
+
+	st := d.overlord.State()
+	st.Lock()
+	chg := st.Change(rsp.Change)
+	c.Assert(chg, check.NotNil)
+	c.Check(chg.Summary(), check.Equals, string(user.ID))
+	st.Unlock()
+}
+
 func (s *apiSuite) TestPostSnapDispatch(c *check.C) {
 	inst := &snapInstruction{}
 
@@ -1092,17 +1151,34 @@ func (o *fakeOverlord) Configure(s *snappy.Snap, c []byte) ([]byte, error) {
 }
 
 func (s *apiSuite) TestSideloadSnap(c *check.C) {
-	// try a direct upload, with no x-allow-unsigned header
-	s.sideloadCheck(c, "xyzzy", false, nil)
-	// try a direct upload *with* an x-allow-unsigned header
-	s.sideloadCheck(c, "xyzzy", true, map[string]string{"X-Allow-Unsigned": "Very Yes"})
-	// try a multipart/form-data upload without allow-unsigned
-	s.sideloadCheck(c, "----hello--\r\nContent-Disposition: form-data; name=\"x\"; filename=\"x\"\r\n\r\nxyzzy\r\n----hello----\r\n", false, map[string]string{"Content-Type": "multipart/thing; boundary=--hello--"})
-	// and one *with* allow-unsigned
-	s.sideloadCheck(c, "----hello--\r\nContent-Disposition: form-data; name=\"unsigned-ok\"\r\n\r\n----hello--\r\nContent-Disposition: form-data; name=\"x\"; filename=\"x\"\r\n\r\nxyzzy\r\n----hello----\r\n", false, map[string]string{"Content-Type": "multipart/thing; boundary=--hello--"})
+	// try a multipart/form-data upload
+	body := "" +
+		"----hello--\r\n" +
+		"Content-Disposition: form-data; name=\"x\"; filename=\"x\"\r\n" +
+		"\r\n" +
+		"xyzzy\r\n" +
+		"----hello--\r\n"
+	head := map[string]string{"Content-Type": "multipart/thing; boundary=--hello--"}
+	s.sideloadCheck(c, body, head, 0)
 }
 
-func (s *apiSuite) sideloadCheck(c *check.C, content string, unsignedExpected bool, head map[string]string) {
+func (s *apiSuite) TestSideloadSnapDevMode(c *check.C) {
+	body := "" +
+		"----hello--\r\n" +
+		"Content-Disposition: form-data; name=\"x\"; filename=\"x\"\r\n" +
+		"\r\n" +
+		"xyzzy\r\n" +
+		"----hello--\r\n" +
+		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
+		"\r\n" +
+		"true\r\n" +
+		"----hello--\r\n"
+	head := map[string]string{"Content-Type": "multipart/thing; boundary=--hello--"}
+	// try a multipart/form-data upload
+	s.sideloadCheck(c, body, head, snappy.DeveloperMode)
+}
+
+func (s *apiSuite) sideloadCheck(c *check.C, content string, head map[string]string, expectedFlags snappy.InstallFlags) {
 	d := newTestDaemon(c)
 	d.overlord.Loop()
 	defer d.overlord.Stop()
@@ -1115,17 +1191,14 @@ func (s *apiSuite) sideloadCheck(c *check.C, content string, unsignedExpected bo
 	c.Check(err, check.IsNil)
 
 	// setup done
-	var expectedFlags snappy.InstallFlags
-	if unsignedExpected {
-		expectedFlags |= snappy.AllowUnauthenticated
-	}
-
 	installQueue := []string{}
 	snapstateGet = func(s *state.State, name string, snapst *snapstate.SnapState) error {
 		// pretend we do not have a state for ubuntu-core
 		return state.ErrNoState
 	}
-	snapstateInstall = func(s *state.State, name, channel string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
+		// NOTE: ubuntu-core is not installed in developer mode
+		c.Check(flags, check.Equals, snappy.InstallFlags(0))
 		installQueue = append(installQueue, name)
 
 		t := s.NewTask("fake-install-snap", "Doing a fake install")
@@ -1152,9 +1225,9 @@ func (s *apiSuite) sideloadCheck(c *check.C, content string, unsignedExpected bo
 
 	rsp := sideloadSnap(snapsCmd, req).(*resp)
 	c.Check(rsp.Type, check.Equals, ResponseTypeAsync)
-	c.Check(installQueue, check.HasLen, 2)
-	c.Assert(installQueue[0], check.Equals, "ubuntu-core")
-	c.Assert(installQueue[1], check.Matches, ".*/snapd-sideload-pkg-.*")
+	c.Assert(installQueue, check.HasLen, 2)
+	c.Check(installQueue[0], check.Equals, "ubuntu-core")
+	c.Check(installQueue[1], check.Matches, ".*/snapd-sideload-pkg-.*")
 }
 
 func (s *apiSuite) TestAppIconGet(c *check.C) {
@@ -1278,7 +1351,7 @@ func (s *apiSuite) TestInstall(c *check.C) {
 		// we have ubuntu-core
 		return nil
 	}
-	snapstateInstall = func(s *state.State, name, channel string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
 		calledFlags = flags
 		installQueue = append(installQueue, name)
 
@@ -1295,11 +1368,51 @@ func (s *apiSuite) TestInstall(c *check.C) {
 
 	d.overlord.Loop()
 	defer d.overlord.Stop()
-	_, err := inst.dispatch()()
+	chg, err := inst.dispatch()()
 
 	c.Check(calledFlags, check.Equals, snappy.DoInstallGC)
 	c.Check(err, check.IsNil)
 	c.Check(installQueue, check.DeepEquals, []string{"some-snap"})
+	c.Check(chg.Kind(), check.Equals, "install-snap")
+	c.Check(chg.Summary(), check.Equals, `Install "some-snap" snap`)
+}
+
+func (s *apiSuite) TestRefresh(c *check.C) {
+	calledFlags := snappy.InstallFlags(42)
+	calledUserID := 0
+	installQueue := []string{}
+
+	snapstateGet = func(s *state.State, name string, snapst *snapstate.SnapState) error {
+		// we have ubuntu-core
+		return nil
+	}
+	snapstateUpdate = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
+		calledFlags = flags
+		calledUserID = userID
+		installQueue = append(installQueue, name)
+
+		t := s.NewTask("fake-refresh-snap", "Doing a fake install")
+		return state.NewTaskSet(t), nil
+	}
+
+	d := s.daemon(c)
+	inst := &snapInstruction{
+		overlord: d.overlord,
+		Action:   "refresh",
+		pkg:      "some-snap",
+		userID:   17,
+	}
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+	chg, err := inst.dispatch()()
+
+	c.Check(calledFlags, check.Equals, snappy.DoInstallGC)
+	c.Check(calledUserID, check.Equals, 17)
+	c.Check(err, check.IsNil)
+	c.Check(installQueue, check.DeepEquals, []string{"some-snap"})
+	c.Check(chg.Kind(), check.Equals, "refresh-snap")
+	c.Check(chg.Summary(), check.Equals, `Refresh "some-snap" snap`)
 }
 
 func (s *apiSuite) TestInstallMissingUbuntuCore(c *check.C) {
@@ -1309,7 +1422,7 @@ func (s *apiSuite) TestInstallMissingUbuntuCore(c *check.C) {
 		// pretend we do not have a state for ubuntu-core
 		return state.ErrNoState
 	}
-	snapstateInstall = func(s *state.State, name, channel string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
 		t1 := s.NewTask("fake-install-snap", name)
 		t2 := s.NewTask("fake-install-snap", "second task is just here so that we can check that the wait is correctly added to all tasks")
 		installQueue = append(installQueue, t1, t2)
@@ -1341,8 +1454,45 @@ func (s *apiSuite) TestInstallMissingUbuntuCore(c *check.C) {
 	c.Check(installQueue[3].WaitTasks(), check.HasLen, 2)
 }
 
+// Installing ubuntu-core when not having ubuntu-core doesn't misbehave and try
+// to install ubuntu-core twice.
+func (s *apiSuite) TestInstallUbuntuCoreWhenMissing(c *check.C) {
+	installQueue := []*state.Task{}
+
+	snapstateGet = func(s *state.State, name string, snapst *snapstate.SnapState) error {
+		// pretend we do not have a state for ubuntu-core
+		return state.ErrNoState
+	}
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
+		t1 := s.NewTask("fake-install-snap", name)
+		t2 := s.NewTask("fake-install-snap", "second task is just here so that we can check that the wait is correctly added to all tasks")
+		installQueue = append(installQueue, t1, t2)
+		return state.NewTaskSet(t1, t2), nil
+	}
+
+	d := s.daemon(c)
+	inst := &snapInstruction{
+		overlord: d.overlord,
+		Action:   "install",
+		pkg:      "ubuntu-core",
+	}
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+	_, err := inst.dispatch()()
+	c.Check(err, check.IsNil)
+
+	d.overlord.State().Lock()
+	defer d.overlord.State().Unlock()
+	c.Check(installQueue, check.HasLen, 2)
+	// the only "ubuntu-core" install tasks
+	c.Check(installQueue[0].Summary(), check.Equals, "ubuntu-core")
+	c.Check(installQueue[0].WaitTasks(), check.HasLen, 0)
+	c.Check(installQueue[1].WaitTasks(), check.HasLen, 0)
+}
+
 func (s *apiSuite) TestInstallFails(c *check.C) {
-	snapstateInstall = func(s *state.State, name, channel string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
 		t := s.NewTask("fake-install-snap-error", "Install task")
 		return state.NewTaskSet(t), nil
 	}
@@ -1369,7 +1519,7 @@ func (s *apiSuite) TestInstallFails(c *check.C) {
 func (s *apiSuite) TestInstallLeaveOld(c *check.C) {
 	calledFlags := snappy.InstallFlags(42)
 
-	snapstateInstall = func(s *state.State, name, channel string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
 		calledFlags = flags
 
 		t := s.NewTask("fake-install-snap", "Doing a fake install")
@@ -1389,6 +1539,33 @@ func (s *apiSuite) TestInstallLeaveOld(c *check.C) {
 
 	c.Check(calledFlags, check.Equals, snappy.InstallFlags(0))
 	c.Check(err, check.IsNil)
+}
+
+func (s *apiSuite) TestInstallDevMode(c *check.C) {
+	var calledFlags snappy.InstallFlags
+
+	snapstateInstall = func(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
+		calledFlags = flags
+
+		t := s.NewTask("fake-install-snap", "Doing a fake install")
+		return state.NewTaskSet(t), nil
+	}
+
+	d := s.daemon(c)
+	inst := &snapInstruction{
+		overlord: d.overlord,
+		Action:   "install",
+		// Install the snap in developer mode
+		DevMode: true,
+	}
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+	_, err := inst.dispatch()()
+	c.Check(err, check.IsNil)
+
+	// DevMode was converted to the snappy.DeveloperMode flag
+	c.Check(calledFlags&snappy.DeveloperMode, check.Equals, snappy.DeveloperMode)
 }
 
 func snapList(rawSnaps interface{}) []map[string]interface{} {
@@ -2231,6 +2408,9 @@ func setupChanges(st *state.State) []string {
 }
 
 func (s *apiSuite) TestStateChangesDefaultToInProgress(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
 	// Setup
 	d := newTestDaemon(c)
 	st := d.overlord.State()
@@ -2251,10 +2431,13 @@ func (s *apiSuite) TestStateChangesDefaultToInProgress(c *check.C) {
 	res, err := rsp.MarshalJSON()
 	c.Assert(err, check.IsNil)
 
-	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["INFO: l11","INFO: l12"],"progress":{"done":0,"total":1}}.*`)
+	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["2016-04-21T01:02:03Z INFO l11","2016-04-21T01:02:03Z INFO l12"],"progress":{"done":0,"total":1},"spawn-time":"2016-04-21T01:02:03Z"}.*`)
 }
 
 func (s *apiSuite) TestStateChangesInProgress(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
 	// Setup
 	d := newTestDaemon(c)
 	st := d.overlord.State()
@@ -2275,10 +2458,13 @@ func (s *apiSuite) TestStateChangesInProgress(c *check.C) {
 	res, err := rsp.MarshalJSON()
 	c.Assert(err, check.IsNil)
 
-	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["INFO: l11","INFO: l12"],"progress":{"done":0,"total":1}}.*],"ready":false}.*`)
+	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["2016-04-21T01:02:03Z INFO l11","2016-04-21T01:02:03Z INFO l12"],"progress":{"done":0,"total":1},"spawn-time":"2016-04-21T01:02:03Z"}.*],"ready":false,"spawn-time":"2016-04-21T01:02:03Z"}.*`)
 }
 
 func (s *apiSuite) TestStateChangesAll(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
 	// Setup
 	d := newTestDaemon(c)
 	st := d.overlord.State()
@@ -2298,11 +2484,14 @@ func (s *apiSuite) TestStateChangesAll(c *check.C) {
 	res, err := rsp.MarshalJSON()
 	c.Assert(err, check.IsNil)
 
-	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["INFO: l11","INFO: l12"],"progress":{"done":0,"total":1}}.*],"ready":false}.*`)
-	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"remove","summary":"remove..","status":"Error","tasks":\[{"id":"\w+","kind":"unlink","summary":"1...","status":"Error","log":\["ERROR: rm failed"],"progress":{"done":1,"total":1}}.*],"ready":true,"err":"[^"]+".*`)
+	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"install","summary":"install...","status":"Do","tasks":\[{"id":"\w+","kind":"download","summary":"1...","status":"Do","log":\["2016-04-21T01:02:03Z INFO l11","2016-04-21T01:02:03Z INFO l12"],"progress":{"done":0,"total":1},"spawn-time":"2016-04-21T01:02:03Z"}.*],"ready":false,"spawn-time":"2016-04-21T01:02:03Z"}.*`)
+	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"remove","summary":"remove..","status":"Error","tasks":\[{"id":"\w+","kind":"unlink","summary":"1...","status":"Error","log":\["2016-04-21T01:02:03Z ERROR rm failed"],"progress":{"done":1,"total":1},"spawn-time":"2016-04-21T01:02:03Z","ready-time":"2016-04-21T01:02:03Z"}.*],"ready":true,"err":"[^"]+".*`)
 }
 
 func (s *apiSuite) TestStateChangesReady(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
 	// Setup
 	d := newTestDaemon(c)
 	st := d.overlord.State()
@@ -2322,10 +2511,13 @@ func (s *apiSuite) TestStateChangesReady(c *check.C) {
 	res, err := rsp.MarshalJSON()
 	c.Assert(err, check.IsNil)
 
-	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"remove","summary":"remove..","status":"Error","tasks":\[{"id":"\w+","kind":"unlink","summary":"1...","status":"Error","log":\["ERROR: rm failed"],"progress":{"done":1,"total":1}}.*],"ready":true,"err":"[^"]+".*`)
+	c.Check(string(res), check.Matches, `.*{"id":"\w+","kind":"remove","summary":"remove..","status":"Error","tasks":\[{"id":"\w+","kind":"unlink","summary":"1...","status":"Error","log":\["2016-04-21T01:02:03Z ERROR rm failed"],"progress":{"done":1,"total":1},"spawn-time":"2016-04-21T01:02:03Z","ready-time":"2016-04-21T01:02:03Z"}.*],"ready":true,"err":"[^"]+".*`)
 }
 
 func (s *apiSuite) TestStateChange(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
 	// Setup
 	d := newTestDaemon(c)
 	st := d.overlord.State()
@@ -2351,27 +2543,128 @@ func (s *apiSuite) TestStateChange(c *check.C) {
 	err = json.Unmarshal(rec.Body.Bytes(), &body)
 	c.Check(err, check.IsNil)
 	c.Check(body["result"], check.DeepEquals, map[string]interface{}{
-		"id":      ids[0],
-		"kind":    "install",
-		"summary": "install...",
-		"status":  "Do",
-		"ready":   false,
+		"id":         ids[0],
+		"kind":       "install",
+		"summary":    "install...",
+		"status":     "Do",
+		"ready":      false,
+		"spawn-time": "2016-04-21T01:02:03Z",
 		"tasks": []interface{}{
 			map[string]interface{}{
-				"id":       ids[2],
-				"kind":     "download",
-				"summary":  "1...",
-				"status":   "Do",
-				"log":      []interface{}{"INFO: l11", "INFO: l12"},
-				"progress": map[string]interface{}{"done": 0., "total": 1.},
+				"id":         ids[2],
+				"kind":       "download",
+				"summary":    "1...",
+				"status":     "Do",
+				"log":        []interface{}{"2016-04-21T01:02:03Z INFO l11", "2016-04-21T01:02:03Z INFO l12"},
+				"progress":   map[string]interface{}{"done": 0., "total": 1.},
+				"spawn-time": "2016-04-21T01:02:03Z",
 			},
 			map[string]interface{}{
-				"id":       ids[3],
-				"kind":     "activate",
-				"summary":  "2...",
-				"status":   "Do",
-				"progress": map[string]interface{}{"done": 0., "total": 1.},
+				"id":         ids[3],
+				"kind":       "activate",
+				"summary":    "2...",
+				"status":     "Do",
+				"progress":   map[string]interface{}{"done": 0., "total": 1.},
+				"spawn-time": "2016-04-21T01:02:03Z",
 			},
 		},
+	})
+}
+
+func (s *apiSuite) TestStateChangeAbort(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
+	// Setup
+	d := newTestDaemon(c)
+	st := d.overlord.State()
+	st.Lock()
+	ids := setupChanges(st)
+	st.Unlock()
+	s.vars = map[string]string{"id": ids[0]}
+
+	buf := bytes.NewBufferString(`{"action": "abort"}`)
+
+	// Execute
+	req, err := http.NewRequest("POST", "/v2/changes/"+ids[0], buf)
+	c.Assert(err, check.IsNil)
+	rsp := abortChange(stateChangeCmd, req).(*resp)
+	rec := httptest.NewRecorder()
+	rsp.ServeHTTP(rec, req)
+
+	// Verify
+	c.Check(rec.Code, check.Equals, 200)
+	c.Check(rsp.Status, check.Equals, http.StatusOK)
+	c.Check(rsp.Type, check.Equals, ResponseTypeSync)
+	c.Check(rsp.Result, check.NotNil)
+
+	var body map[string]interface{}
+	err = json.Unmarshal(rec.Body.Bytes(), &body)
+	c.Check(err, check.IsNil)
+	c.Check(body["result"], check.DeepEquals, map[string]interface{}{
+		"id":         ids[0],
+		"kind":       "install",
+		"summary":    "install...",
+		"status":     "Hold",
+		"ready":      true,
+		"spawn-time": "2016-04-21T01:02:03Z",
+		"ready-time": "2016-04-21T01:02:03Z",
+		"tasks": []interface{}{
+			map[string]interface{}{
+				"id":         ids[2],
+				"kind":       "download",
+				"summary":    "1...",
+				"status":     "Hold",
+				"log":        []interface{}{"2016-04-21T01:02:03Z INFO l11", "2016-04-21T01:02:03Z INFO l12"},
+				"progress":   map[string]interface{}{"done": 1., "total": 1.},
+				"spawn-time": "2016-04-21T01:02:03Z",
+				"ready-time": "2016-04-21T01:02:03Z",
+			},
+			map[string]interface{}{
+				"id":         ids[3],
+				"kind":       "activate",
+				"summary":    "2...",
+				"status":     "Hold",
+				"progress":   map[string]interface{}{"done": 1., "total": 1.},
+				"spawn-time": "2016-04-21T01:02:03Z",
+				"ready-time": "2016-04-21T01:02:03Z",
+			},
+		},
+	})
+}
+
+func (s *apiSuite) TestStateChangeAbortIsReady(c *check.C) {
+	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
+	defer restore()
+
+	// Setup
+	d := newTestDaemon(c)
+	st := d.overlord.State()
+	st.Lock()
+	ids := setupChanges(st)
+	st.Change(ids[0]).SetStatus(state.DoneStatus)
+	st.Unlock()
+	s.vars = map[string]string{"id": ids[0]}
+
+	buf := bytes.NewBufferString(`{"action": "abort"}`)
+
+	// Execute
+	req, err := http.NewRequest("POST", "/v2/changes/"+ids[0], buf)
+	c.Assert(err, check.IsNil)
+	rsp := abortChange(stateChangeCmd, req).(*resp)
+	rec := httptest.NewRecorder()
+	rsp.ServeHTTP(rec, req)
+
+	// Verify
+	c.Check(rec.Code, check.Equals, 400)
+	c.Check(rsp.Status, check.Equals, http.StatusBadRequest)
+	c.Check(rsp.Type, check.Equals, ResponseTypeError)
+	c.Check(rsp.Result, check.NotNil)
+
+	var body map[string]interface{}
+	err = json.Unmarshal(rec.Body.Bytes(), &body)
+	c.Check(err, check.IsNil)
+	c.Check(body["result"], check.DeepEquals, map[string]interface{}{
+		"message": fmt.Sprintf("cannot abort change %s with nothing pending", ids[0]),
 	})
 }
