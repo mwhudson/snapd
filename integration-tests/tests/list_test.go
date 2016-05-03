@@ -39,31 +39,27 @@ type listSuite struct {
 var verRegexp = `(\d{2}\.\d{2}.*|\w{12})`
 
 func (s *listSuite) TestListMustPrintCoreVersion(c *check.C) {
-	c.Skip("port to snapd")
-
-	listOutput := cli.ExecCommand(c, "snappy", "list")
+	listOutput := cli.ExecCommand(c, "snap", "list")
 
 	expected := "(?ms)" +
-		"Name +Date +Version +Developer *\n" +
+		"Name +Version +Rev +Developer *\n" +
 		".*" +
-		fmt.Sprintf("^%s +.* +%s +(canonical|sideload) *\n", partition.OSSnapName(c), verRegexp) +
+		fmt.Sprintf("^%s +.* +%s + [0-9]+ +(canonical|sideload) *\n", partition.OSSnapName(c), verRegexp) +
 		".*"
 	c.Assert(listOutput, check.Matches, expected)
 }
 
 func (s *listSuite) TestListMustPrintAppVersion(c *check.C) {
-	c.Skip("port to snapd")
-
-	common.InstallSnap(c, "hello-world/edge")
+	common.InstallSnap(c, "hello-world")
 	s.AddCleanup(func() {
 		common.RemoveSnap(c, "hello-world")
 	})
 
-	listOutput := cli.ExecCommand(c, "snappy", "list")
+	listOutput := cli.ExecCommand(c, "snap", "list")
 	expected := "(?ms)" +
-		"Name +Date +Version +Developer *\n" +
+		"Name +Version +Rev +Developer *\n" +
 		".*" +
-		"^hello-world +.* +(\\d+)(\\.\\d+)* +.* +.* *\n" +
+		"^hello-world +(\\d+)(\\.\\d+)* +[0-9]+ +.* *\n" +
 		".*"
 
 	c.Assert(listOutput, check.Matches, expected)

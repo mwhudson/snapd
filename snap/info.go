@@ -45,8 +45,14 @@ type PlaceInfo interface {
 	// DataDir returns the data directory of the snap.
 	DataDir() string
 
+	// CommonDataDir returns the data directory common across revisions of the snap.
+	CommonDataDir() string
+
 	// DataHomeDir returns the per user data directory of the snap.
 	DataHomeDir() string
+
+	// CommonDataHomeDir returns the per user data directory common across revisions of the snap.
+	CommonDataHomeDir() string
 }
 
 // MinimalPlaceInfo returns a PlaceInfo with just the location information for a snap of the given name and revision.
@@ -59,8 +65,18 @@ func MountDir(name string, revision int) string {
 	return filepath.Join(dirs.SnapSnapsDir, name, strconv.Itoa(revision))
 }
 
-// SideInfo holds snap metadata that is not included in snap.yaml or for which the store is the canonical source.
-// It can be marshalled both as JSON and YAML.
+// SideInfo holds snap metadata that is crucial for the tracking of
+// snaps and for the working of the system offline and which is not
+// included in snap.yaml or for which the store is the canonical
+// source overriding snap.yaml content.
+//
+// It can be marshalled and will be stored in the system state for
+// each currently installed snap revision so it needs to be evolved
+// carefully.
+//
+// Information that can be taken directly from snap.yaml or that comes
+// from the store but is not required for working offline should not
+// end up in SideInfo.
 type SideInfo struct {
 	OfficialName      string `yaml:"name,omitempty" json:"name,omitempty"`
 	SnapID            string `yaml:"snap-id" json:"snap-id"`
@@ -71,9 +87,6 @@ type SideInfo struct {
 	EditedDescription string `yaml:"description,omitempty" json:"description,omitempty"`
 	Size              int64  `yaml:"size,omitempty" json:"size,omitempty"`
 	Sha512            string `yaml:"sha512,omitempty" json:"sha512,omitempty"`
-	IconURL           string `yaml:"icon-url,omitempty" json:"icon-url,omitempty"`
-
-	Prices map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 }
 
 // Info provides information about snaps.
@@ -96,11 +109,15 @@ type Info struct {
 	// legacy fields collected
 	Legacy *LegacyYaml
 
-	// The information in these fields is not present inside the snap blob itself.
+	// The information in all the remaining fields is not sourced from the snap blob itself.
 	SideInfo
 
+	// The information in these fields is ephemeral, available only from the store.
 	AnonDownloadURL string
 	DownloadURL     string
+
+	IconURL string
+	Prices  map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 }
 
 // Name returns the blessed name for the snap.
@@ -146,9 +163,19 @@ func (s *Info) DataDir() string {
 	return filepath.Join(dirs.SnapDataDir, s.Name(), s.strRevno())
 }
 
+// CommonDataDir returns the data directory common across revisions of the snap.
+func (s *Info) CommonDataDir() string {
+	return filepath.Join(dirs.SnapDataDir, s.Name(), "common")
+}
+
 // DataHomeDir returns the per user data directory of the snap.
 func (s *Info) DataHomeDir() string {
 	return filepath.Join(dirs.SnapDataHomeGlob, s.Name(), s.strRevno())
+}
+
+// CommonDataHomeDir returns the per user data directory common across revisions of the snap.
+func (s *Info) CommonDataHomeDir() string {
+	return filepath.Join(dirs.SnapDataHomeGlob, s.Name(), "common")
 }
 
 // sanity check that Info is a PlacInfo
@@ -232,10 +259,21 @@ func (app *AppInfo) ServiceSocketFile() string {
 	return filepath.Join(dirs.SnapServicesDir, app.SecurityTag()+".socket")
 }
 
+func infoFromSnapYamlWithSideInfo(meta []byte, si *SideInfo) (*Info, error) {
+	info, err := InfoFromSnapYaml(meta)
+	if err != nil {
+		return nil, err
+	}
+
+	if si != nil {
+		info.SideInfo = *si
+	}
+
+	return info, nil
+}
+
 // ReadInfo reads the snap information for the installed snap with the given name and given side-info.
 func ReadInfo(name string, si *SideInfo) (*Info, error) {
-	// XXX: test directly when we don't have to invent the nth way
-	// to mock installed snaps!
 	snapYamlFn := filepath.Join(MountDir(name, si.Revision), "meta", "snap.yaml")
 	meta, err := ioutil.ReadFile(snapYamlFn)
 	if os.IsNotExist(err) {
@@ -245,12 +283,26 @@ func ReadInfo(name string, si *SideInfo) (*Info, error) {
 		return nil, err
 	}
 
-	info, err := InfoFromSnapYaml(meta)
+	return infoFromSnapYamlWithSideInfo(meta, si)
+}
+
+// ReadInfoFromSnapFile reads the snap information from the given File
+// and completes it with the given side-info if this is not nil.
+func ReadInfoFromSnapFile(snapf File, si *SideInfo) (*Info, error) {
+	meta, err := snapf.ReadFile("meta/snap.yaml")
 	if err != nil {
 		return nil, err
 	}
 
-	info.SideInfo = *si
+	info, err := infoFromSnapYamlWithSideInfo(meta, si)
+	if err != nil {
+		return nil, err
+	}
+
+	err = Validate(info)
+	if err != nil {
+		return nil, err
+	}
 
 	return info, nil
 }

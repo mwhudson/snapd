@@ -39,6 +39,7 @@ type Snap struct {
 	Status        string    `json:"status"`
 	Type          string    `json:"type"`
 	Version       string    `json:"version"`
+	Revision      int       `json:"revision"`
 
 	Prices map[string]float64 `json:"prices"`
 }
@@ -57,11 +58,10 @@ const (
 	StatusActive    = "active"
 	StatusRemoved   = "removed"
 
-	TypeApp       = "app"
-	TypeFramework = "framework"
-	TypeKernel    = "kernel"
-	TypeGadget    = "gadget"
-	TypeOS        = "os"
+	TypeApp    = "app"
+	TypeKernel = "kernel"
+	TypeGadget = "gadget"
+	TypeOS     = "os"
 )
 
 type ResultInfo struct {
