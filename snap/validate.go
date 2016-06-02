@@ -26,12 +26,32 @@ import (
 
 // Regular expression describing correct identifiers.
 var validName = regexp.MustCompile("^[a-z](?:-?[a-z0-9])*$")
+var validEpoch = regexp.MustCompile("^(?:0|[1-9][0-9]*[*]?)$")
+var validHookName = regexp.MustCompile(`^[a-z](?:-?[a-z])*$`)
 
 // ValidateName checks if a string can be used as a snap name.
 func ValidateName(name string) error {
 	valid := validName.MatchString(name)
 	if !valid {
 		return fmt.Errorf("invalid snap name: %q", name)
+	}
+	return nil
+}
+
+// ValidateEpoch checks if a string can be used as a snap epoch.
+func ValidateEpoch(epoch string) error {
+	valid := validEpoch.MatchString(epoch)
+	if !valid {
+		return fmt.Errorf("invalid snap epoch: %q", epoch)
+	}
+	return nil
+}
+
+// ValidateHook validates the content of the given HookInfo
+func ValidateHook(hook *HookInfo) error {
+	valid := validHookName.MatchString(hook.Name)
+	if !valid {
+		return fmt.Errorf("invalid hook name: %q", hook.Name)
 	}
 	return nil
 }
@@ -47,9 +67,26 @@ func Validate(info *Info) error {
 		return err
 	}
 
+	epoch := info.Epoch
+	if epoch == "" {
+		return fmt.Errorf("snap epoch cannot be empty")
+	}
+	err = ValidateEpoch(epoch)
+	if err != nil {
+		return err
+	}
+
 	// validate app entries
 	for _, app := range info.Apps {
 		err := ValidateApp(app)
+		if err != nil {
+			return err
+		}
+	}
+
+	// validate hook entries
+	for _, hook := range info.Hooks {
+		err := ValidateHook(hook)
 		if err != nil {
 			return err
 		}

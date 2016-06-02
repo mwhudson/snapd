@@ -24,11 +24,11 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ubuntu-core/snappy/i18n"
-	"github.com/ubuntu-core/snappy/logger"
-	"github.com/ubuntu-core/snappy/overlord/state"
-	"github.com/ubuntu-core/snappy/snap"
-	"github.com/ubuntu-core/snappy/snappy"
+	"github.com/snapcore/snapd/i18n"
+	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/overlord/state"
+	"github.com/snapcore/snapd/snap"
+	"github.com/snapcore/snapd/snappy"
 )
 
 // allow exchange in the tests
@@ -141,6 +141,14 @@ func InstallPath(s *state.State, name, path, channel string, flags snappy.Instal
 	return doInstall(s, snapst.Active, name, path, channel, 0, flags)
 }
 
+// TryPath returns a set of tasks for trying a snap from a file path.
+// Note that the state must be locked by the caller.
+func TryPath(s *state.State, name, path string, flags snappy.InstallFlags) (*state.TaskSet, error) {
+	flags |= snappy.TryMode
+
+	return InstallPath(s, name, path, "", flags)
+}
+
 // Update initiates a change updating a snap.
 // Note that the state must be locked by the caller.
 func Update(s *state.State, name, channel string, userID int, flags snappy.InstallFlags) (*state.TaskSet, error) {
@@ -161,7 +169,7 @@ func Update(s *state.State, name, channel string, userID int, flags snappy.Insta
 	return doInstall(s, snapst.Active, name, "", channel, userID, flags)
 }
 
-func removeInactiveRevision(s *state.State, name string, revision int, flags snappy.RemoveFlags) *state.TaskSet {
+func removeInactiveRevision(s *state.State, name string, revision snap.Revision, flags snappy.RemoveFlags) *state.TaskSet {
 	ss := SnapSetup{
 		Name:     name,
 		Revision: revision,
@@ -267,7 +275,7 @@ var readInfo = snap.ReadInfo
 
 // Info returns the information about the snap with given name and revision.
 // Works also for a mounted candidate snap in the process of being installed.
-func Info(s *state.State, name string, revision int) (*snap.Info, error) {
+func Info(s *state.State, name string, revision snap.Revision) (*snap.Info, error) {
 	var snapst SnapState
 	err := Get(s, name, &snapst)
 	if err == state.ErrNoState {
@@ -287,7 +295,7 @@ func Info(s *state.State, name string, revision int) (*snap.Info, error) {
 		return readInfo(name, snapst.Candidate)
 	}
 
-	return nil, fmt.Errorf("cannot find snap %q at revision %d", name, revision)
+	return nil, fmt.Errorf("cannot find snap %q at revision %s", name, revision.String())
 }
 
 // Current returns the information about the current revision of a snap with the given name.
