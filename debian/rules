@@ -8,15 +8,12 @@ export DH_GOPKG := github.com/snapcore/snapd
 export DH_GOLANG_EXCLUDES=integration-tests
 export DH_GOLANG_GO_GENERATE=1
 
-# we need the builddir; is there a simpler way to get it?
-BUILDDIR:=${CURDIR}/obj-$(shell dpkg-architecture -qDEB_TARGET_GNU_TYPE)
-
 export PATH:=${PATH}:${CURDIR}
 
 RELEASE = $(shell lsb_release -c -s)
 
 %:
-	dh $@ --buildsystem=golang --with=golang --fail-missing --with systemd
+	dh $@ --buildsystem=golang --with=golang --fail-missing --with systemd --builddirectory=_build
 
 override_dh_systemd_enable:
 	# enable boot-ok
@@ -78,7 +75,7 @@ override_dh_auto_install: snap.8
 	rm -f ${CURDIR}/debian/tmp/usr/bin/snappy
 
 snap.8:
-	${BUILDDIR}/bin/snap help --man > $@
+	$(CURDIR)/_build/bin/snap help --man > $@
 
 override_dh_auto_clean:
 	dh_auto_clean -O--buildsystem=golang
