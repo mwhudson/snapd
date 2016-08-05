@@ -50,7 +50,7 @@ func (s *FirstBootTestSuite) SetUpTest(c *C) {
 	s.nplandir = nplandir
 	nplandir = c.MkDir()
 	s.enableConfig = enableConfig
-	enableConfig = "/sbin/true"
+	enableConfig = "/bin/true"
 
 	s.e = nil
 }
