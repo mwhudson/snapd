@@ -1,6 +1,7 @@
 snapd (2.12+16.10~ppa4~16.04.1) UNRELEASED; urgency=medium
 
   * Hacks for console-conf.
+    - Generate neplan config rather than ifupdown.
 
  -- Michael Hudson-Doyle <michael.hudson@ubuntu.com>  Fri, 05 Aug 2016 12:24:34 +1200
 
