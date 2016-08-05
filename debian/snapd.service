@@ -3,7 +3,9 @@ Description=Snappy daemon
 #FIXME: snappy on ubuntu does not have a snapd.firstboot snap installed
 #After=snapd.firstboot.service
 Before=snapd.frameworks-pre.target
-Requires=snapd.socket
+# Depending on systemd-networkd is a total hack to make sure systemd-networkd
+# sees the config that firstboot may have written.
+Requires=snapd.socket systemd-networkd.service
 
 [Service]
 ExecStart=/usr/lib/snapd/snapd
