@@ -1,4 +1,4 @@
-snapd (2.12+16.10~ppa4~16.04.1) UNRELEASED; urgency=medium
+snapd (2.12+16.10~ppa4~16.04.1) xenial; urgency=medium
 
   * Hacks for console-conf.
     - Generate neplan config rather than ifupdown in firstboot.
