@@ -46,10 +46,14 @@ func AddExtraSudoUser(name string, sshKeys []string, gecos string) error {
 		"--gecos", gecos,
 		"--extrausers",
 		"--disabled-password",
-		"--add_extra_groups", "sudo",
 		name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("adduser failed with %s: %s", err, output)
+	}
+
+	cmd = exec.Command("adduser", name, "sudo")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("adding user to sudo group failed with %s: %s", err, output)
 	}
 
 	u, err := userLookup(name)
@@ -64,6 +68,11 @@ func AddExtraSudoUser(name string, sshKeys []string, gecos string) error {
 	authKeysContent := strings.Join(sshKeys, "\n")
 	if err := ioutil.WriteFile(authKeys, []byte(authKeysContent), 0644); err != nil {
 		return fmt.Errorf("cannot write %s: %s", authKeys, err)
+	}
+
+	cmd = exec.Command("chown", "-R", u.Uid+":"+u.Gid, sshDir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("changing ownser of sshDir failed %s: %s", err, output)
 	}
 
 	return nil
