@@ -22,9 +22,9 @@ package backend
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/snapcore/snapd/boot"
-	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/progress"
 	"github.com/snapcore/snapd/snap"
 )
@@ -52,9 +52,8 @@ func (b Backend) SetupSnap(snapFilePath string, sideInfo *snap.SideInfo, meter p
 		return err
 	}
 
-	// FIXME: special handling is bad 'mkay
 	if s.Type == snap.TypeKernel {
-		if err := boot.ExtractKernelAssets(s, meter); err != nil {
+		if err := boot.ExtractKernelAssets(s, snapf); err != nil {
 			return fmt.Errorf("cannot install kernel: %s", err)
 		}
 	}
@@ -63,7 +62,7 @@ func (b Backend) SetupSnap(snapFilePath string, sideInfo *snap.SideInfo, meter p
 }
 
 // RemoveSnapFiles removes the snap files from the disk after unmounting the snap.
-func (b Backend) RemoveSnapFiles(s snap.PlaceInfo, meter progress.Meter) error {
+func (b Backend) RemoveSnapFiles(s snap.PlaceInfo, typ snap.Type, meter progress.Meter) error {
 	mountDir := s.MountDir()
 
 	// this also ensures that the mount unit stops
@@ -75,18 +74,16 @@ func (b Backend) RemoveSnapFiles(s snap.PlaceInfo, meter progress.Meter) error {
 		return err
 	}
 
+	// try to remove parent dir, failure is ok, means some other
+	// revisions are still in there
+	os.Remove(filepath.Dir(mountDir))
+
+	// snapPath may either be a file or a (broken) symlink to a dir
 	snapPath := s.MountFile()
-
-	if osutil.FileExists(snapPath) {
-		// XXX: would be better if this information was in the state directly
-		info, _, err := OpenSnapFile(snapPath, nil)
-		if err != nil {
-			return fmt.Errorf("cannot read snap file %q to determine snap type: %v", snapPath, err)
-		}
-
+	if _, err := os.Lstat(snapPath); err == nil {
 		// remove the kernel assets (if any)
-		if info.Type == snap.TypeKernel {
-			if err := boot.RemoveKernelAssets(s, meter); err != nil {
+		if typ == snap.TypeKernel {
+			if err := boot.RemoveKernelAssets(s); err != nil {
 				return err
 			}
 		}
@@ -101,6 +98,6 @@ func (b Backend) RemoveSnapFiles(s snap.PlaceInfo, meter progress.Meter) error {
 }
 
 // UndoSetupSnap undoes the work of SetupSnap using RemoveSnapFiles.
-func (b Backend) UndoSetupSnap(s snap.PlaceInfo, meter progress.Meter) error {
-	return b.RemoveSnapFiles(s, meter)
+func (b Backend) UndoSetupSnap(s snap.PlaceInfo, typ snap.Type, meter progress.Meter) error {
+	return b.RemoveSnapFiles(s, typ, meter)
 }

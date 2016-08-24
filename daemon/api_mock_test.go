@@ -43,9 +43,15 @@ func (s *apiSuite) mockSnap(c *C, yamlText string) *snap.Info {
 
 	// Put a side info into the state
 	snapstate.Set(st, snapInfo.Name(), &snapstate.SnapState{
-		Active:   true,
-		Sequence: []*snap.SideInfo{{Revision: snapInfo.Revision}},
-		Current:  snapInfo.Revision,
+		Active: true,
+		Sequence: []*snap.SideInfo{
+			{
+				RealName: snapInfo.Name(),
+				Revision: snapInfo.Revision,
+				SnapID:   "ididid",
+			},
+		},
+		Current: snapInfo.Revision,
 	})
 
 	// Put the snap into the interface repository
@@ -62,6 +68,11 @@ func (s *apiSuite) mockIface(c *C, iface interfaces.Interface) {
 	err := s.d.overlord.InterfaceManager().Repository().AddInterface(iface)
 	c.Assert(err, IsNil)
 }
+
+var simpleYaml = `
+name: simple
+version: 1
+`
 
 var consumerYaml = `
 name: consumer

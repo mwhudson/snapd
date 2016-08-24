@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -128,6 +129,18 @@ var (
 	doTimeout = 5 * time.Second
 )
 
+// MockDoRetry mocks the delays used by the do retry loop.
+func MockDoRetry(retry, timeout time.Duration) (restore func()) {
+	oldRetry := doRetry
+	oldTimeout := doTimeout
+	doRetry = retry
+	doTimeout = timeout
+	return func() {
+		doRetry = oldRetry
+		doTimeout = oldTimeout
+	}
+}
+
 // do performs a request and decodes the resulting json into the given
 // value. It's low-level, for testing/experimenting only; you should
 // usually use a higher level interface that builds on this.
@@ -157,7 +170,12 @@ func (client *Client) do(method, path string, query url.Values, headers map[stri
 	if v != nil {
 		dec := json.NewDecoder(rsp.Body)
 		if err := dec.Decode(v); err != nil {
-			return err
+			r := dec.Buffered()
+			buf, err1 := ioutil.ReadAll(r)
+			if err1 != nil {
+				buf = []byte(fmt.Sprintf("error reading buffered response body: %s", err1))
+			}
+			return fmt.Errorf("cannot decode %q: %s", buf, err)
 		}
 	}
 
@@ -331,20 +349,20 @@ func (client *Client) SysInfo() (*SysInfo, error) {
 
 // CreateUserResult holds the result of a user creation
 type CreateUserResult struct {
-	Username string `json:"username"`
+	Username    string `json:"username"`
+	SSHKeyCount int    `json:"ssh-key-count"`
 }
 
 // createUserRequest holds the user creation request
-type createUserRequest struct {
-	EMail string `json:"email"`
+type CreateUserRequest struct {
+	Email  string `json:"email"`
+	Sudoer bool   `json:"sudoer"`
 }
 
 // CreateUser creates a user from the given mail address
-func (client *Client) CreateUser(mail string) (*CreateUserResult, error) {
+func (client *Client) CreateUser(request *CreateUserRequest) (*CreateUserResult, error) {
 	var createResult CreateUserResult
-	b, err := json.Marshal(createUserRequest{
-		EMail: mail,
-	})
+	b, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}

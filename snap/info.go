@@ -60,22 +60,27 @@ type PlaceInfo interface {
 
 // MinimalPlaceInfo returns a PlaceInfo with just the location information for a snap of the given name and revision.
 func MinimalPlaceInfo(name string, revision Revision) PlaceInfo {
-	return &Info{SideInfo: SideInfo{OfficialName: name, Revision: revision}}
+	return &Info{SideInfo: SideInfo{RealName: name, Revision: revision}}
 }
 
 // MountDir returns the base directory where it gets mounted of the snap with the given name and revision.
 func MountDir(name string, revision Revision) string {
-	return filepath.Join(dirs.SnapSnapsDir, name, revision.String())
+	return filepath.Join(dirs.SnapMountDir, name, revision.String())
+}
+
+// SecurityTag returns the snap-specific security tag.
+func SecurityTag(snapName string) string {
+	return fmt.Sprintf("snap.%s", snapName)
 }
 
 // AppSecurityTag returns the application-specific security tag.
 func AppSecurityTag(snapName, appName string) string {
-	return fmt.Sprintf("snap.%s.%s", snapName, appName)
+	return fmt.Sprintf("%s.%s", SecurityTag(snapName), appName)
 }
 
 // HookSecurityTag returns the hook-specific security tag.
 func HookSecurityTag(snapName, hookName string) string {
-	return fmt.Sprintf("snap.%s.hook.%s", snapName, hookName)
+	return fmt.Sprintf("%s.hook.%s", SecurityTag(snapName), hookName)
 }
 
 // SideInfo holds snap metadata that is crucial for the tracking of
@@ -91,11 +96,12 @@ func HookSecurityTag(snapName, hookName string) string {
 // from the store but is not required for working offline should not
 // end up in SideInfo.
 type SideInfo struct {
-	OfficialName      string   `yaml:"name,omitempty" json:"name,omitempty"`
+	RealName          string   `yaml:"name,omitempty" json:"name,omitempty"`
 	SnapID            string   `yaml:"snap-id" json:"snap-id"`
 	Revision          Revision `yaml:"revision" json:"revision"`
 	Channel           string   `yaml:"channel,omitempty" json:"channel,omitempty"`
-	Developer         string   `yaml:"developer,omitempty" json:"developer,omitempty"`
+	DeveloperID       string   `yaml:"developer-id,omitempty" json:"developer-id,omitempty"`
+	Developer         string   `yaml:"developer,omitempty" json:"developer,omitempty"` // XXX: obsolete, will be retired after full backfilling of DeveloperID
 	EditedSummary     string   `yaml:"summary,omitempty" json:"summary,omitempty"`
 	EditedDescription string   `yaml:"description,omitempty" json:"description,omitempty"`
 	Size              int64    `yaml:"size,omitempty" json:"size,omitempty"`
@@ -129,18 +135,18 @@ type Info struct {
 	SideInfo
 
 	// The information in these fields is ephemeral, available only from the store.
-	AnonDownloadURL string
-	DownloadURL     string
+	DownloadInfo
 
 	IconURL string
 	Prices  map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 	MustBuy bool
+	Broken  string
 }
 
 // Name returns the blessed name for the snap.
 func (s *Info) Name() string {
-	if s.OfficialName != "" {
-		return s.OfficialName
+	if s.RealName != "" {
+		return s.RealName
 	}
 	return s.SuggestedName
 }
@@ -181,6 +187,16 @@ func (s *Info) DataDir() string {
 	return filepath.Join(dirs.SnapDataDir, s.Name(), s.Revision.String())
 }
 
+// UserDataDir returns the user-specific data directory of the snap.
+func (s *Info) UserDataDir(home string) string {
+	return filepath.Join(home, "snap", s.Name(), s.Revision.String())
+}
+
+// UserCommonDataDir returns the user-specific data directory common across revision of the snap.
+func (s *Info) UserCommonDataDir(home string) string {
+	return filepath.Join(home, "snap", s.Name(), "common")
+}
+
 // CommonDataDir returns the data directory common across revisions of the snap.
 func (s *Info) CommonDataDir() string {
 	return filepath.Join(dirs.SnapDataDir, s.Name(), "common")
@@ -199,6 +215,13 @@ func (s *Info) CommonDataHomeDir() string {
 // NeedsDevMode retursn whether the snap needs devmode.
 func (s *Info) NeedsDevMode() bool {
 	return s.Confinement == DevmodeConfinement
+}
+
+// DownloadInfo contains the information to download a snap.
+// It can be marshalled.
+type DownloadInfo struct {
+	AnonDownloadURL string `json:"anon-download-url,omitempty"`
+	DownloadURL     string `json:"download-url,omitempty"`
 }
 
 // sanity check that Info is a PlaceInfo
@@ -342,6 +365,16 @@ func (app *AppInfo) Env() []string {
 // sometimes also as a part of the file name.
 func (hook *HookInfo) SecurityTag() string {
 	return HookSecurityTag(hook.Snap.Name(), hook.Name)
+}
+
+// Env returns the hook-specific environment overrides
+func (hook *HookInfo) Env() []string {
+	env := []string{}
+	hookEnv := copyEnv(hook.Snap.Environment)
+	for k, v := range hookEnv {
+		env = append(env, fmt.Sprintf("%s=%s\n", k, v))
+	}
+	return env
 }
 
 func infoFromSnapYamlWithSideInfo(meta []byte, si *SideInfo) (*Info, error) {

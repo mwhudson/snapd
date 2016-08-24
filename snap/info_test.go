@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 
 	. "gopkg.in/check.v1"
@@ -34,16 +35,21 @@ import (
 	"github.com/snapcore/snapd/snap/squashfs"
 )
 
-type infoSuite struct{}
+type infoSuite struct {
+	restore func()
+}
 
 var _ = Suite(&infoSuite{})
 
 func (s *infoSuite) SetUpTest(c *C) {
 	dirs.SetRootDir(c.MkDir())
+	hookType := snap.NewHookType(regexp.MustCompile(".*"))
+	s.restore = snap.MockSupportedHookTypes([]*snap.HookType{hookType})
 }
 
 func (s *infoSuite) TearDownTest(c *C) {
 	dirs.SetRootDir("")
+	s.restore()
 }
 
 func (s *infoSuite) TestSideInfoOverrides(c *C) {
@@ -54,11 +60,12 @@ func (s *infoSuite) TestSideInfoOverrides(c *C) {
 	}
 
 	info.SideInfo = snap.SideInfo{
-		OfficialName:      "newname",
+		RealName:          "newname",
 		EditedSummary:     "fixed summary",
 		EditedDescription: "fixed desc",
 		Revision:          snap.R(1),
 		SnapID:            "snapidsnapidsnapidsnapidsnapidsn",
+		DeveloperID:       "deviddeviddeviddeviddeviddevidde",
 	}
 
 	c.Check(info.Name(), Equals, "newname")
@@ -66,6 +73,7 @@ func (s *infoSuite) TestSideInfoOverrides(c *C) {
 	c.Check(info.Description(), Equals, "fixed desc")
 	c.Check(info.Revision, Equals, snap.R(1))
 	c.Check(info.SnapID, Equals, "snapidsnapidsnapidsnapidsnapidsn")
+	c.Check(info.DeveloperID, Equals, "deviddeviddeviddeviddeviddevidde")
 }
 
 func (s *infoSuite) TestAppInfoSecurityTag(c *C) {
@@ -98,8 +106,10 @@ apps:
 	c.Assert(err, IsNil)
 	info.Revision = snap.R(42)
 
-	c.Check(info.Apps["bar"].LauncherCommand(), Equals, "/usr/bin/ubuntu-core-launcher snap.foo.bar snap.foo.bar /snap/foo/42/bar-bin -x")
-	c.Check(info.Apps["foo"].LauncherCommand(), Equals, "/usr/bin/ubuntu-core-launcher snap.foo.foo snap.foo.foo /snap/foo/42/foo-bin")
+	c.Check(info.Apps["bar"].LauncherCommand(), Equals,
+		fmt.Sprintf("/usr/bin/ubuntu-core-launcher snap.foo.bar snap.foo.bar %s/foo/42/bar-bin -x", dirs.SnapMountDir))
+	c.Check(info.Apps["foo"].LauncherCommand(), Equals,
+		fmt.Sprintf("/usr/bin/ubuntu-core-launcher snap.foo.foo snap.foo.foo %s/foo/42/foo-bin", dirs.SnapMountDir))
 }
 
 const sampleYaml = `
@@ -203,8 +213,8 @@ type: app`
 	c.Assert(err, IsNil)
 
 	info, err := snap.ReadInfoFromSnapFile(snapf, &snap.SideInfo{
-		OfficialName: "baz",
-		Revision:     snap.R(42),
+		RealName: "baz",
+		Revision: snap.R(42),
 	})
 	c.Assert(err, IsNil)
 	c.Check(info.Name(), Equals, "baz")
@@ -329,7 +339,7 @@ func (s *infoSuite) TestReadInfoFromSnapFileCatchesInvalidHook(c *C) {
 	yaml := `name: foo
 version: 1.0
 hooks:
-  abc123:`
+  123abc:`
 	snapPath := makeTestSnap(c, yaml)
 
 	snapf, err := snap.Open(snapPath)
@@ -342,7 +352,7 @@ hooks:
 func (s *infoSuite) TestReadInfoFromSnapFileCatchesInvalidImplicitHook(c *C) {
 	yaml := `name: foo
 version: 1.0`
-	snapPath := snaptest.MakeTestSnapWithFiles(c, yaml, emptyHooks("abc123"))
+	snapPath := snaptest.MakeTestSnapWithFiles(c, yaml, emptyHooks("123abc"))
 
 	snapf, err := snap.Open(snapPath)
 	c.Assert(err, IsNil)
@@ -401,6 +411,19 @@ version: 1.0`
 	})
 }
 
+func (s *infoSuite) TestReadInfoInvalidImplicitHook(c *C) {
+	hookType := snap.NewHookType(regexp.MustCompile("foo"))
+	s.restore = snap.MockSupportedHookTypes([]*snap.HookType{hookType})
+
+	yaml := `name: foo
+version: 1.0`
+	s.checkInstalledSnapAndSnapFile(c, yaml, []string{"foo", "bar"}, func(c *C, info *snap.Info) {
+		// Verify that only foo has been loaded, not bar
+		c.Check(info.Hooks, HasLen, 1)
+		verifyImplicitHook(c, info, "foo")
+	})
+}
+
 func (s *infoSuite) TestReadInfoImplicitAndExplicitHooks(c *C) {
 	yaml := `name: foo
 version: 1.0
@@ -443,4 +466,19 @@ func verifyExplicitHook(c *C, info *snap.Info, hookName string, plugNames []stri
 		// Verify also that the hook plug made it into info.Plugs
 		c.Check(info.Plugs[plugName], DeepEquals, plug)
 	}
+}
+
+func (s *infoSuite) TestDirAndFileMethods(c *C) {
+	dirs.SetRootDir("")
+	info := &snap.Info{SuggestedName: "name", SideInfo: snap.SideInfo{Revision: snap.R(1)}}
+	c.Check(info.MountDir(), Equals, fmt.Sprintf("%s/name/1", dirs.SnapMountDir))
+	c.Check(info.MountFile(), Equals, "/var/lib/snapd/snaps/name_1.snap")
+	c.Check(info.HooksDir(), Equals, fmt.Sprintf("%s/name/1/meta/hooks", dirs.SnapMountDir))
+	c.Check(info.DataDir(), Equals, "/var/snap/name/1")
+	c.Check(info.UserDataDir("/home/bob"), Equals, "/home/bob/snap/name/1")
+	c.Check(info.UserCommonDataDir("/home/bob"), Equals, "/home/bob/snap/name/common")
+	c.Check(info.CommonDataDir(), Equals, "/var/snap/name/common")
+	// XXX: Those are actually a globs, not directories
+	c.Check(info.DataHomeDir(), Equals, "/home/*/snap/name/1")
+	c.Check(info.CommonDataHomeDir(), Equals, "/home/*/snap/name/common")
 }

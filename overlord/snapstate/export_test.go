@@ -58,6 +58,7 @@ func (m *SnapManager) AddForeignTaskHandlers(tracker ForeignTaskTracker) {
 	m.runner.AddHandler("setup-profiles", fakeHandler, fakeHandler)
 	m.runner.AddHandler("remove-profiles", fakeHandler, fakeHandler)
 	m.runner.AddHandler("discard-conns", fakeHandler, fakeHandler)
+	m.runner.AddHandler("validate-snap", fakeHandler, nil)
 
 	// Add handler to test full aborting of changes
 	erroringHandler := func(task *state.Task, _ *tomb.Tomb) error {
@@ -67,8 +68,9 @@ func (m *SnapManager) AddForeignTaskHandlers(tracker ForeignTaskTracker) {
 }
 
 func MockReadInfo(mock func(name string, si *snap.SideInfo) (*snap.Info, error)) (restore func()) {
+	old := readInfo
 	readInfo = mock
-	return func() { readInfo = snap.ReadInfo }
+	return func() { readInfo = old }
 }
 
 func MockOpenSnapFile(mock func(path string, si *snap.SideInfo) (*snap.Info, snap.Container, error)) (restore func()) {
@@ -78,12 +80,11 @@ func MockOpenSnapFile(mock func(path string, si *snap.SideInfo) (*snap.Info, sna
 }
 
 var (
-	CheckSnap = checkSnap
-	CanRemove = canRemove
+	CheckSnap   = checkSnap
+	CanRemove   = canRemove
+	CachedStore = cachedStore
 )
 
-// flagscompat
-const (
-	InterimUnusableFlagValueMin  = interimUnusableLegacyFlagValueMin
-	InterimUnusableFlagValueLast = interimUnusableLegacyFlagValueLast
-)
+func PreviousSideInfo(snapst *SnapState) *snap.SideInfo {
+	return snapst.previousSideInfo()
+}

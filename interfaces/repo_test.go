@@ -50,7 +50,7 @@ name: consumer
 apps:
     app:
 hooks:
-    test-hook:
+    apply-config:
 plugs:
     plug:
         interface: interface
@@ -64,7 +64,7 @@ name: producer
 apps:
     app:
 hooks:
-    test-hook:
+    apply-config:
 slots:
     slot:
         interface: interface
@@ -549,11 +549,11 @@ func (s *RepositorySuite) TestConnectSucceedsWhenIdenticalConnectExists(c *C) {
 	c.Assert(s.testRepo.Interfaces(), DeepEquals, &Interfaces{
 		Plugs: []*Plug{{
 			PlugInfo:    s.plug.PlugInfo,
-			Connections: []SlotRef{{s.slot.Snap.Name(), s.slot.Name}},
+			Connections: []SlotRef{{Snap: s.slot.Snap.Name(), Name: s.slot.Name}},
 		}},
 		Slots: []*Slot{{
 			SlotInfo:    s.slot.SlotInfo,
-			Connections: []PlugRef{{s.plug.Snap.Name(), s.plug.Name}},
+			Connections: []PlugRef{{Snap: s.plug.Snap.Name(), Name: s.plug.Name}},
 		}},
 	})
 }
@@ -714,11 +714,11 @@ func (s *RepositorySuite) TestInterfacesSmokeTest(c *C) {
 	c.Assert(ifaces, DeepEquals, &Interfaces{
 		Plugs: []*Plug{{
 			PlugInfo:    s.plug.PlugInfo,
-			Connections: []SlotRef{{s.slot.Snap.Name(), s.slot.Name}},
+			Connections: []SlotRef{{Snap: s.slot.Snap.Name(), Name: s.slot.Name}},
 		}},
 		Slots: []*Slot{{
 			SlotInfo:    s.slot.SlotInfo,
-			Connections: []PlugRef{{s.plug.Snap.Name(), s.plug.Name}},
+			Connections: []PlugRef{{Snap: s.plug.Snap.Name(), Name: s.plug.Name}},
 		}},
 	})
 	// After disconnecting the connections become empty
@@ -774,7 +774,7 @@ func (s *RepositorySuite) TestSlotSnippetsForSnapSuccess(c *C) {
 		"snap.consumer.app": [][]byte{
 			[]byte(`static plug snippet`),
 		},
-		"snap.consumer.hook.test-hook": [][]byte{
+		"snap.consumer.hook.apply-config": [][]byte{
 			[]byte(`static plug snippet`),
 		},
 	})
@@ -795,7 +795,7 @@ func (s *RepositorySuite) TestSlotSnippetsForSnapSuccess(c *C) {
 			[]byte(`static plug snippet`),
 			[]byte(`connection-specific plug snippet`),
 		},
-		"snap.consumer.hook.test-hook": [][]byte{
+		"snap.consumer.hook.apply-config": [][]byte{
 			[]byte(`static plug snippet`),
 			[]byte(`connection-specific plug snippet`),
 		},
