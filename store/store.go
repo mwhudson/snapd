@@ -107,6 +107,9 @@ type Config struct {
 	PurchasesURI      *url.URL
 	PaymentMethodsURI *url.URL
 
+	// StoreID is the store id used if we can't get one through the AuthContext.
+	StoreID string
+
 	Architecture string
 	Series       string
 
@@ -115,7 +118,6 @@ type Config struct {
 
 // Store represents the ubuntu snap store
 type Store struct {
-	storeID           string
 	searchURI         *url.URL
 	detailsURI        *url.URL
 	bulkURI           *url.URL
@@ -125,6 +127,8 @@ type Store struct {
 
 	architecture string
 	series       string
+
+	fallbackStoreID string
 
 	detailFields []string
 	// reused http client
@@ -274,7 +278,7 @@ type searchResults struct {
 var detailFields = getStructFields(snapDetails{})
 
 // New creates a new Store with the given access configuration and for given the store id.
-func New(cfg *Config, storeID string, authContext auth.AuthContext) *Store {
+func New(cfg *Config, authContext auth.AuthContext) *Store {
 	if cfg == nil {
 		cfg = &defaultConfig
 	}
@@ -317,7 +321,6 @@ func New(cfg *Config, storeID string, authContext auth.AuthContext) *Store {
 
 	// see https://wiki.ubuntu.com/AppStore/Interfaces/ClickPackageIndex
 	return &Store{
-		storeID:           storeID,
 		searchURI:         searchURI,
 		detailsURI:        detailsURI,
 		bulkURI:           cfg.BulkURI,
@@ -326,6 +329,7 @@ func New(cfg *Config, storeID string, authContext auth.AuthContext) *Store {
 		paymentMethodsURI: cfg.PaymentMethodsURI,
 		series:            series,
 		architecture:      architecture,
+		fallbackStoreID:   cfg.StoreID,
 		detailFields:      fields,
 		client:            newHTTPClient(),
 		authContext:       authContext,
@@ -381,17 +385,81 @@ func refreshMacaroon(user *auth.UserState) error {
 	return nil
 }
 
-// authenticateDevice will add the store expected Macaroon X-Device-Authorization header for device
-func (s *Store) authenticateDevice(r *http.Request) {
+// refreshUser will refresh user discharge macaroon and update state
+func (s *Store) refreshUser(user *auth.UserState) error {
+	err := refreshMacaroon(user)
+	if err != nil {
+		return err
+	}
+
 	if s.authContext != nil {
-		device, err := s.authContext.Device()
+		err = s.authContext.UpdateUser(user)
 		if err != nil {
-			logger.Debugf("cannot get device from state: %v", err)
-			return
+			return err
 		}
-		if device.SessionMacaroon != "" {
-			r.Header.Set("X-Device-Authorization", fmt.Sprintf(`Macaroon root="%s"`, device.SessionMacaroon))
+	}
+
+	return nil
+}
+
+// refreshDeviceSession will set or refresh the device session in the state
+func (s *Store) refreshDeviceSession() error {
+	if s.authContext == nil {
+		return fmt.Errorf("internal error: no authContext")
+	}
+
+	device, err := s.authContext.Device()
+	if err != nil {
+		return err
+	}
+
+	serialAssertion, err := s.authContext.Serial()
+	if err != nil {
+		return err
+	}
+
+	nonce, err := RequestStoreDeviceNonce()
+	if err != nil {
+		return err
+	}
+
+	serialProof, err := s.authContext.SerialProof(nonce)
+	if err != nil {
+		return err
+	}
+
+	session, err := RequestDeviceSession(string(serialAssertion), string(serialProof), device.SessionMacaroon)
+	if err != nil {
+		return err
+	}
+
+	device.SessionMacaroon = session
+	err = s.authContext.UpdateDevice(device)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// authenticateDevice will add the store expected Macaroon X-Device-Authorization header for device
+func authenticateDevice(r *http.Request, device *auth.DeviceState) {
+	if device.SessionMacaroon != "" {
+		r.Header.Set("X-Device-Authorization", fmt.Sprintf(`Macaroon root="%s"`, device.SessionMacaroon))
+	}
+}
+
+func (s *Store) setStoreID(r *http.Request) {
+	storeID := s.fallbackStoreID
+	if s.authContext != nil {
+		cand, err := s.authContext.StoreID(storeID)
+		if err != nil {
+			logger.Debugf("cannot get store ID from state: %v", err)
+		} else {
+			storeID = cand
 		}
+	}
+	if storeID != "" {
+		r.Header.Set("X-Ubuntu-Store", storeID)
 	}
 }
 
@@ -417,25 +485,32 @@ func (s *Store) doRequest(client *http.Client, reqOptions *requestOptions, user 
 	}
 
 	wwwAuth := resp.Header.Get("WWW-Authenticate")
-	if resp.StatusCode == 401 && user != nil && strings.Contains(wwwAuth, "needs_refresh=1") {
-		// close previous response, refresh and retry
-		resp.Body.Close()
-		err = refreshMacaroon(user)
-		if err != nil {
-			return nil, err
-		}
-		if s.authContext != nil {
-			err = s.authContext.UpdateUser(user)
+	if resp.StatusCode == 401 {
+		refreshed := false
+		if user != nil && strings.Contains(wwwAuth, "needs_refresh=1") {
+			// refresh user
+			err = s.refreshUser(user)
 			if err != nil {
 				return nil, err
 			}
+			refreshed = true
 		}
-		req, err := s.newRequest(reqOptions, user)
-		if err != nil {
-			return nil, err
+		if strings.Contains(wwwAuth, "refresh_device_session=1") {
+			// refresh device session
+			err = s.refreshDeviceSession()
+			if err != nil {
+				return nil, err
+			}
+			refreshed = true
 		}
-		resp, err = client.Do(req)
+		if refreshed {
+			// close previous response and retry
+			// TODO: make this non-recursive or add a recursion limit
+			resp.Body.Close()
+			return s.doRequest(client, reqOptions, user)
+		}
 	}
+
 	return resp, err
 }
 
@@ -451,7 +526,15 @@ func (s *Store) newRequest(reqOptions *requestOptions, user *auth.UserState) (*h
 		return nil, err
 	}
 
-	s.authenticateDevice(req)
+	if s.authContext != nil {
+		device, err := s.authContext.Device()
+		if err != nil {
+			return nil, err
+		}
+		// TODO: if device session is empty, request new session
+		authenticateDevice(req, device)
+	}
+
 	if user != nil {
 		authenticateUser(req, user)
 	}
@@ -466,9 +549,7 @@ func (s *Store) newRequest(reqOptions *requestOptions, user *auth.UserState) (*h
 		req.Header.Set("Content-Type", reqOptions.ContentType)
 	}
 
-	if s.storeID != "" {
-		req.Header.Set("X-Ubuntu-Store", s.storeID)
-	}
+	s.setStoreID(req)
 
 	return req, nil
 }
@@ -647,14 +728,18 @@ func mustBuy(prices map[string]float64, purchases []*purchase) bool {
 }
 
 // Snap returns the snap.Info for the store hosted snap with the given name or an error.
-func (s *Store) Snap(name, channel string, devmode bool, user *auth.UserState) (*snap.Info, error) {
+func (s *Store) Snap(name, channel string, devmode bool, revision snap.Revision, user *auth.UserState) (*snap.Info, error) {
 	u, err := s.detailsURI.Parse(name)
 	if err != nil {
 		return nil, err
 	}
 
 	query := u.Query()
-	if channel != "" {
+
+	if !revision.Unset() {
+		query.Set("revision", revision.String())
+		query.Set("channel", "") // sidestep the channel map
+	} else if channel != "" {
 		query.Set("channel", channel)
 	}
 
