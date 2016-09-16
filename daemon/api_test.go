@@ -1320,13 +1320,27 @@ func (s *apiSuite) TestPostSnapDispatch(c *check.C) {
 	}
 }
 
+func (s *apiSuite) TestPostSnapEnableDisableRevision(c *check.C) {
+	for _, action := range []string{"enable", "disable"} {
+		buf := bytes.NewBufferString(`{"action": "` + action + `", "revision": "42"}`)
+		req, err := http.NewRequest("POST", "/v2/snaps/hello-world", buf)
+		c.Assert(err, check.IsNil)
+
+		rsp := postSnap(snapCmd, req, nil).(*resp)
+
+		c.Check(rsp.Type, check.Equals, ResponseTypeError)
+		c.Check(rsp.Status, check.Equals, http.StatusBadRequest)
+		c.Check(rsp.Result.(*errorResult).Message, testutil.Contains, "takes no revision")
+	}
+}
+
 var sideLoadBodyWithoutDevMode = "" +
 	"----hello--\r\n" +
 	"Content-Disposition: form-data; name=\"snap\"; filename=\"x\"\r\n" +
 	"\r\n" +
 	"xyzzy\r\n" +
 	"----hello--\r\n" +
-	"Content-Disposition: form-data; name=\"force-dangerous\"\r\n" +
+	"Content-Disposition: form-data; name=\"dangerous\"\r\n" +
 	"\r\n" +
 	"true\r\n" +
 	"----hello--\r\n" +
@@ -1363,10 +1377,6 @@ func (s *apiSuite) TestSideloadSnapDevMode(c *check.C) {
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
-		"----hello--\r\n" +
-		"Content-Disposition: form-data; name=\"force-dangerous\"\r\n" +
-		"\r\n" +
-		"true\r\n" +
 		"----hello--\r\n"
 	head := map[string]string{"Content-Type": "multipart/thing; boundary=--hello--"}
 	// try a multipart/form-data upload
@@ -1387,7 +1397,7 @@ func (s *apiSuite) TestSideloadSnapJailMode(c *check.C) {
 		"\r\n" +
 		"true\r\n" +
 		"----hello--\r\n" +
-		"Content-Disposition: form-data; name=\"force-dangerous\"\r\n" +
+		"Content-Disposition: form-data; name=\"dangerous\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
 		"----hello--\r\n"
@@ -1409,10 +1419,6 @@ func (s *apiSuite) TestSideloadSnapJailModeAndDevmode(c *check.C) {
 		"true\r\n" +
 		"----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
-		"\r\n" +
-		"true\r\n" +
-		"----hello--\r\n" +
-		"Content-Disposition: form-data; name=\"force-dangerous\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
 		"----hello--\r\n"
@@ -1754,6 +1760,54 @@ func (s *apiSuite) sideloadCheck(c *check.C, content string, head map[string]str
 	return chg.Summary()
 }
 
+func (s *apiSuite) TestSetConf(c *check.C) {
+	d := s.daemon(c)
+	s.mockSnap(c, configYaml)
+
+	// Mock the hook runner
+	hookRunner := testutil.MockCommand(c, "snap", "")
+	defer hookRunner.Restore()
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+
+	text, err := json.Marshal(map[string]interface{}{"key": "value"})
+	c.Assert(err, check.IsNil)
+
+	buffer := bytes.NewBuffer(text)
+	req, err := http.NewRequest("PUT", "/v2/snaps/config-snap/conf", buffer)
+	c.Assert(err, check.IsNil)
+
+	s.vars = map[string]string{"name": "config-snap"}
+
+	rec := httptest.NewRecorder()
+	snapConfCmd.PUT(snapConfCmd, req, nil).ServeHTTP(rec, req)
+	c.Check(rec.Code, check.Equals, 202)
+
+	var body map[string]interface{}
+	err = json.Unmarshal(rec.Body.Bytes(), &body)
+	c.Check(err, check.IsNil)
+	id := body["change"].(string)
+
+	st := d.overlord.State()
+	st.Lock()
+	chg := st.Change(id)
+	st.Unlock()
+	c.Assert(chg, check.NotNil)
+
+	<-chg.Ready()
+
+	st.Lock()
+	err = chg.Err()
+	st.Unlock()
+	c.Assert(err, check.IsNil)
+
+	// Check that the apply-config hook was run correctly
+	c.Check(hookRunner.Calls(), check.DeepEquals, [][]string{[]string{
+		"snap", "run", "--hook", "apply-config", "-r", "unset", "config-snap",
+	}})
+}
+
 func (s *apiSuite) TestAppIconGet(c *check.C) {
 	d := s.daemon(c)
 
@@ -1829,6 +1883,12 @@ func (s *apiSuite) TestAppIconGetNoApp(c *check.C) {
 
 	appIconCmd.GET(appIconCmd, req, nil).ServeHTTP(rec, req)
 	c.Check(rec.Code, check.Equals, 404)
+}
+
+func (s *apiSuite) TestNotInstalledSnapIcon(c *check.C) {
+	info := &snap.Info{SuggestedName: "notInstalledSnap", IconURL: "icon.svg"}
+	iconfile := snapIcon(info)
+	c.Check(iconfile, testutil.Contains, "icon.svg")
 }
 
 func (s *apiSuite) TestInstallOnNonDevModeDistro(c *check.C) {
@@ -1908,7 +1968,7 @@ func (s *apiSuite) TestRefresh(c *check.C) {
 		// we have ubuntu-core
 		return nil
 	}
-	snapstateUpdate = func(s *state.State, name, channel string, userID int, flags snapstate.Flags) (*state.TaskSet, error) {
+	snapstateUpdate = func(s *state.State, name, channel string, revision snap.Revision, userID int, flags snapstate.Flags) (*state.TaskSet, error) {
 		calledFlags = flags
 		calledUserID = userID
 		installQueue = append(installQueue, name)
@@ -1946,7 +2006,7 @@ func (s *apiSuite) TestRefreshDevMode(c *check.C) {
 		// we have ubuntu-core
 		return nil
 	}
-	snapstateUpdate = func(s *state.State, name, channel string, userID int, flags snapstate.Flags) (*state.TaskSet, error) {
+	snapstateUpdate = func(s *state.State, name, channel string, revision snap.Revision, userID int, flags snapstate.Flags) (*state.TaskSet, error) {
 		calledFlags = flags
 		calledUserID = userID
 		installQueue = append(installQueue, name)

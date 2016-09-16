@@ -58,6 +58,7 @@ var (
 	SnapDeclarationType = &AssertionType{"snap-declaration", []string{"series", "snap-id"}, assembleSnapDeclaration, 0}
 	SnapBuildType       = &AssertionType{"snap-build", []string{"snap-sha3-384"}, assembleSnapBuild, 0}
 	SnapRevisionType    = &AssertionType{"snap-revision", []string{"snap-sha3-384"}, assembleSnapRevision, 0}
+	ValidationType      = &AssertionType{"validation", []string{"series", "snap-id", "approved-snap-id", "approved-snap-revision"}, assembleValidation, 0}
 
 // ...
 )
@@ -67,7 +68,7 @@ var (
 	DeviceSessionRequestType = &AssertionType{"device-session-request", []string{"brand-id", "model", "serial"}, assembleDeviceSessionRequest, noAuthority}
 	SerialProofType          = &AssertionType{"serial-proof", nil, assembleSerialProof, noAuthority}
 	SerialRequestType        = &AssertionType{"serial-request", nil, assembleSerialRequest, noAuthority}
-	AccountKeyRequestType    = &AssertionType{"account-key-request", nil, assembleAccountKeyRequest, noAuthority}
+	AccountKeyRequestType    = &AssertionType{"account-key-request", []string{"public-key-sha3-384"}, assembleAccountKeyRequest, noAuthority}
 )
 
 var typeRegistry = map[string]*AssertionType{
@@ -78,6 +79,7 @@ var typeRegistry = map[string]*AssertionType{
 	SnapDeclarationType.Name: SnapDeclarationType,
 	SnapBuildType.Name:       SnapBuildType,
 	SnapRevisionType.Name:    SnapRevisionType,
+	ValidationType.Name:      ValidationType,
 	// no authority
 	DeviceSessionRequestType.Name: DeviceSessionRequestType,
 	SerialProofType.Name:          SerialProofType,
@@ -149,6 +151,12 @@ type Assertion interface {
 
 	// Ref returns a reference representing this assertion.
 	Ref() *Ref
+}
+
+// customSigner represents an assertion with special arrangements for its signing key (e.g. self-signed), rather than the usual case where an assertion is signed by its authority.
+type customSigner interface {
+	// signKey returns the public key material for the key that signed this assertion.  See also SignKeyID.
+	signKey() PublicKey
 }
 
 // MediaType is the media type for encoded assertions on the wire.
