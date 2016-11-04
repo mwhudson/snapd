@@ -60,7 +60,7 @@ Dependencies are handled via `govendor`. Get it via:
 After a fresh checkout, move to the snapd source directory:
 
     cd $GOPATH/github.com/snapcore/snapd
-   
+
 And then, run:
 
     govendor sync
@@ -141,7 +141,7 @@ And you can run the tests via:
 
 For quick reuse you can use:
 
-    $ spread -keep qemu:
+    $ spread -reuse qemu:
 
 It will print how to reuse the systems. Make sure to use
 `export REUSE_PROJECT=1` in your environment too.
@@ -153,12 +153,12 @@ To test the `snapd` REST API daemon on a snappy system you need to
 transfer it to the snappy system and then run:
 
     sudo systemctl stop snapd.service snapd.socket
-    sudo /lib/systemd/systemd-activate -E SNAPD_DEBUG=1 -E SNAP_REEXEC=0 -E SNAPD_DEBUG_HTTP3 -l /run/snapd.socket -l /run/snapd-snap.socket ./snapd
+    sudo /lib/systemd/systemd-activate -E SNAPD_DEBUG=1 -E SNAP_REEXEC=0 -E SNAPD_DEBUG_HTTP=3 -l /run/snapd.socket -l /run/snapd-snap.socket ./snapd
 
 or with systemd version >= 230
 
     sudo systemctl stop snapd.service snapd.socket
-    sudo systemd-socket-activate -E SNAPD_DEBUG=1 -E SNAP_REEXEC=0 -E SNAPD_DEBUG_HTTP3 -l /run/snapd.socket -l /run/snapd-snap.socket ./snapd
+    sudo systemd-socket-activate -E SNAPD_DEBUG=1 -E SNAP_REEXEC=0 -E SNAPD_DEBUG_HTTP=3 -l /run/snapd.socket -l /run/snapd-snap.socket ./snapd
 
 This will stop the installed snapd and activate the new one. Once it's
 printed out something like `Listening on /run/snapd.socket as 3.` you
