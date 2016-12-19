@@ -56,6 +56,9 @@ type PlaceInfo interface {
 
 	// CommonDataHomeDir returns the per user data directory common across revisions of the snap.
 	CommonDataHomeDir() string
+
+	// XdgRuntimeDirs returns the XDG_RUNTIME_DIR directories for all users of the snap.
+	XdgRuntimeDirs() string
 }
 
 // MinimalPlaceInfo returns a PlaceInfo with just the location information for a snap of the given name and revision.
@@ -141,6 +144,7 @@ type Info struct {
 	Epoch            string
 	Confinement      ConfinementType
 	Apps             map[string]*AppInfo
+	Aliases          map[string]*AppInfo
 	Hooks            map[string]*HookInfo
 	Plugs            map[string]*PlugInfo
 	Slots            map[string]*SlotInfo
@@ -159,6 +163,18 @@ type Info struct {
 	MustBuy bool
 
 	Screenshots []ScreenshotInfo
+	Channels    map[string]*ChannelSnapInfo
+}
+
+// ChannelSnapInfo is the minimum information that can be used to clearly
+// distinguish different revisions of the same snap.
+type ChannelSnapInfo struct {
+	Revision    Revision        `json:"revision"`
+	Confinement ConfinementType `json:"confinement"`
+	Version     string          `json:"version"`
+	Channel     string          `json:"channel"`
+	Epoch       string          `json:"epoch"`
+	Size        int64           `json:"size"`
 }
 
 // Name returns the blessed name for the snap.
@@ -230,9 +246,24 @@ func (s *Info) CommonDataHomeDir() string {
 	return filepath.Join(dirs.SnapDataHomeGlob, s.Name(), "common")
 }
 
-// NeedsDevMode retursn whether the snap needs devmode.
+// UserXdgRuntimeDir returns the XDG_RUNTIME_DIR directory of the snap for a particular user.
+func (s *Info) UserXdgRuntimeDir(euid int) string {
+	return filepath.Join("/run/user", fmt.Sprintf("%d/snap.%s", euid, s.Name()))
+}
+
+// XdgRuntimeDirs returns the XDG_RUNTIME_DIR directories for all users of the snap.
+func (s *Info) XdgRuntimeDirs() string {
+	return filepath.Join(dirs.XdgRuntimeDirGlob, fmt.Sprintf("snap.%s", s.Name()))
+}
+
+// NeedsDevMode returns whether the snap needs devmode.
 func (s *Info) NeedsDevMode() bool {
-	return s.Confinement == DevmodeConfinement
+	return s.Confinement == DevModeConfinement
+}
+
+// NeedsClassic  returns whether the snap needs classic confinement consent.
+func (s *Info) NeedsClassic() bool {
+	return s.Confinement == ClassicConfinement
 }
 
 // DownloadInfo contains the information to download a snap.
@@ -294,6 +325,7 @@ type AppInfo struct {
 	Snap *Info
 
 	Name    string
+	Aliases []string
 	Command string
 
 	Daemon          string
@@ -301,10 +333,6 @@ type AppInfo struct {
 	StopCommand     string
 	PostStopCommand string
 	RestartCond     systemd.RestartCondition
-
-	Socket       bool
-	SocketMode   string
-	ListenStream string
 
 	// TODO: this should go away once we have more plumbing and can change
 	// things vs refactor
@@ -465,6 +493,12 @@ func ReadInfo(name string, si *SideInfo) (*Info, error) {
 		return nil, err
 	}
 
+	st, err := os.Stat(MountFile(name, si.Revision))
+	if err != nil {
+		return nil, err
+	}
+	info.Size = st.Size()
+
 	err = addImplicitHooks(info)
 	if err != nil {
 		return nil, err
@@ -482,6 +516,11 @@ func ReadInfoFromSnapFile(snapf Container, si *SideInfo) (*Info, error) {
 	}
 
 	info, err := infoFromSnapYamlWithSideInfo(meta, si)
+	if err != nil {
+		return nil, err
+	}
+
+	info.Size, err = snapf.Size()
 	if err != nil {
 		return nil, err
 	}
