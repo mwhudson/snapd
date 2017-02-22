@@ -24,13 +24,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/tomb.v2"
 
 	"github.com/snapcore/snapd/boot"
+	"github.com/snapcore/snapd/errtracker"
 	"github.com/snapcore/snapd/i18n"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/overlord/auth"
 	"github.com/snapcore/snapd/overlord/snapstate/backend"
 	"github.com/snapcore/snapd/overlord/state"
@@ -39,12 +43,14 @@ import (
 	"github.com/snapcore/snapd/store"
 )
 
+var (
+	errtrackerReport = errtracker.Report
+)
+
 // SnapManager is responsible for the installation and removal of snaps.
 type SnapManager struct {
 	state   *state.State
 	backend managerBackend
-
-	lastUbuntuCoreTransitionAttempt time.Time
 
 	runner *state.TaskRunner
 }
@@ -413,20 +419,22 @@ func (m *SnapManager) ensureUbuntuCoreTransition() error {
 	}
 
 	// ensure we limit the retries in case something goes wrong
+	var lastUbuntuCoreTransitionAttempt time.Time
+	err = m.state.Get("ubuntu-core-transition-last-retry-time", &lastUbuntuCoreTransitionAttempt)
+	if err != nil && err != state.ErrNoState {
+		return err
+	}
+	now := time.Now()
+	if !lastUbuntuCoreTransitionAttempt.IsZero() && lastUbuntuCoreTransitionAttempt.Add(6*time.Hour).After(now) {
+		return nil
+	}
+	m.state.Set("ubuntu-core-transition-last-retry-time", now)
+
 	var retryCount int
 	err = m.state.Get("ubuntu-core-transition-retry", &retryCount)
 	if err != nil && err != state.ErrNoState {
 		return err
 	}
-	if retryCount > 5 {
-		// limit amount of retries
-		return nil
-	}
-	now := time.Now()
-	if !m.lastUbuntuCoreTransitionAttempt.IsZero() && m.lastUbuntuCoreTransitionAttempt.Add(12*time.Hour).After(now) {
-		return nil
-	}
-	m.lastUbuntuCoreTransitionAttempt = now
 	m.state.Set("ubuntu-core-transition-retry", retryCount+1)
 
 	tss, err := TransitionCore(m.state, "ubuntu-core", "core")
@@ -530,7 +538,57 @@ func (m *SnapManager) doPrepareSnap(t *state.Task, _ *tomb.Tomb) error {
 }
 
 func (m *SnapManager) undoPrepareSnap(t *state.Task, _ *tomb.Tomb) error {
-	// FIXME: remove the entire function
+	st := t.State()
+	st.Lock()
+	defer st.Unlock()
+
+	snapsup, err := TaskSnapSetup(t)
+	if err != nil {
+		return err
+	}
+
+	// report this error to an error tracker
+	if osutil.GetenvBool("SNAPPY_TESTING") {
+		return nil
+	}
+	if snapsup.SideInfo.RealName == "" {
+		return nil
+	}
+
+	var logMsg []string
+	for _, t := range t.Change().Tasks() {
+		logMsg = append(logMsg, fmt.Sprintf("%s: %s", t.Kind(), t.Status()))
+		for _, l := range t.Log() {
+			// cut of the rfc339 timestamp to ensure duplicate
+			// detection works in daisy
+			tStampLen := strings.Index(l, " ")
+			if tStampLen < 0 {
+				continue
+			}
+			// not tStampLen+1 because the indent is nice
+			logMsg = append(logMsg, l[tStampLen:])
+		}
+	}
+
+	var ubuntuCoreTransitionCount int
+	err = st.Get("ubuntu-core-transition-retry", &ubuntuCoreTransitionCount)
+	if err != nil && err != state.ErrNoState {
+		return err
+	}
+	extra := map[string]string{}
+	if ubuntuCoreTransitionCount > 0 {
+		extra["UbuntuCoreTransitionCount"] = strconv.Itoa(ubuntuCoreTransitionCount)
+	}
+
+	st.Unlock()
+	oopsid, err := errtrackerReport(snapsup.SideInfo.RealName, snapsup.SideInfo.Channel, strings.Join(logMsg, "\n"), extra)
+	st.Lock()
+	if err == nil {
+		logger.Noticef("Reported problem as %s", oopsid)
+	} else {
+		logger.Debugf("Cannot report problem: %s", err)
+	}
+
 	return nil
 }
 

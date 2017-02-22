@@ -1,7 +1,0 @@
-backends:
-  external:
-    systems:
-    - ubuntu-core-16-64:
-        username: test
-        password: ubuntu
-        address: localhost:10023
