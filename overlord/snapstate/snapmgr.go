@@ -804,7 +804,7 @@ func (m *SnapManager) undoPrepareSnap(t *state.Task, _ *tomb.Tomb) error {
 	oopsid, err := errtrackerReport(snapsup.SideInfo.RealName, strings.Join(logMsg, "\n"), strings.Join(dupSig, "\n"), extra)
 	st.Lock()
 	if err == nil {
-		logger.Noticef("Reported problem as %s", oopsid)
+		logger.Noticef("Reported install problem for %q as %s", snapsup.SideInfo.RealName, oopsid)
 	} else {
 		logger.Debugf("Cannot report problem: %s", err)
 	}
@@ -1078,8 +1078,11 @@ func (m *SnapManager) undoUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
 	// mark as active again
 	Set(st, snapsup.Name(), snapst)
 
-	return nil
+	// if we just put back a previous a core snap, request a restart
+	// so that we switch executing its snapd
+	maybeRestart(t, oldInfo)
 
+	return nil
 }
 
 func (m *SnapManager) doUnlinkCurrentSnap(t *state.Task, _ *tomb.Tomb) error {
@@ -1240,20 +1243,27 @@ func (m *SnapManager) doLinkSnap(t *state.Task, _ *tomb.Tomb) error {
 
 	// if we just installed a core snap, request a restart
 	// so that we switch executing its snapd
-	if release.OnClassic && newInfo.Type == snap.TypeOS {
+	maybeRestart(t, newInfo)
+
+	return nil
+}
+
+// maybeRestart will schedule a reboot or restart as needed for the just linked
+// snap with info if it's a core or kernel snap.
+func maybeRestart(t *state.Task, info *snap.Info) {
+	st := t.State()
+	if release.OnClassic && info.Type == snap.TypeOS {
 		t.Logf("Requested daemon restart.")
 		st.Unlock()
 		st.RequestRestart(state.RestartDaemon)
 		st.Lock()
 	}
-	if !release.OnClassic && boot.KernelOrOsRebootRequired(newInfo) {
+	if !release.OnClassic && boot.KernelOrOsRebootRequired(info) {
 		t.Logf("Requested system restart.")
 		st.Unlock()
 		st.RequestRestart(state.RestartSystem)
 		st.Lock()
 	}
-
-	return nil
 }
 
 func (m *SnapManager) undoLinkSnap(t *state.Task, _ *tomb.Tomb) error {
