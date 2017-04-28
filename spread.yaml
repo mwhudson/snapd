@@ -26,15 +26,17 @@ environment:
     MANAGED_DEVICE: "false"
     CORE_CHANNEL: "$(HOST: echo ${SPREAD_CORE_CHANNEL:-edge})"
     KERNEL_CHANNEL: "$(HOST: echo ${SPREAD_KERNEL_CHANNEL:-edge})"
+    GADGET_CHANNEL: "$(HOST: echo ${SPREAD_GADGET_CHANNEL:-edge})"
     REMOTE_STORE: "$(HOST: echo ${SPREAD_REMOTE_STORE:-production})"
     SNAPPY_USE_STAGING_STORE: "$(HOST: if [ $SPREAD_REMOTE_STORE = staging ]; then echo 1; else echo 0; fi)"
     DELTA_REF: 2.17
     DELTA_PREFIX: snapd-$DELTA_REF/
-    SNAPD_PPA_VERSION: "$(HOST: echo $SPREAD_SNAPD_PPA_VERSION)"
+    SNAPD_PUBLISHED_VERSION: "$(HOST: echo $SPREAD_SNAPD_PUBLISHED_VERSION)"
     HTTP_PROXY: "$(HOST: echo $HTTP_PROXY)"
     HTTPS_PROXY: "$(HOST: echo $HTTPS_PROXY)"
     NO_PROXY: "127.0.0.1"
     NEW_CORE_CHANNEL: "$(HOST: echo $SPREAD_NEW_CORE_CHANNEL)"
+    SRU_VALIDATION: "$(HOST: echo ${SPREAD_SRU_VALIDATION:-0})"
 
 backends:
     linode:
@@ -53,6 +55,9 @@ backends:
             - ubuntu-core-16-64:
                 kernel: Direct Disk
                 image: ubuntu-16.04-64
+                workers: 2
+            - debian-unstable-64:
+                kernel: GRUB 2
                 workers: 2
     qemu:
         environment:
@@ -187,9 +192,9 @@ debug-each: |
     echo '# journal messages for snapd'
     journalctl -u snapd
     echo '# apparmor denials '
-    dmesg | grep DENIED || true
+    dmesg --ctime | grep DENIED || true
     echo '# seccomp denials (kills) '
-    dmesg | grep 1326 || true
+    dmesg --ctime | grep type=1326 || true
     echo '# snap interfaces'
     snap interfaces || true
 
