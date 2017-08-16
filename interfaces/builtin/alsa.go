@@ -1,7 +1,7 @@
 // -*- Mode: Go; indent-tabs-mode: t -*-
 
 /*
- * Copyright (C) 2016 Canonical Ltd
+ * Copyright (C) 2016-2017 Canonical Ltd
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -19,7 +19,21 @@
 
 package builtin
 
-import "github.com/snapcore/snapd/interfaces"
+const alsaSummary = `allows access to raw ALSA devices`
+
+const alsaDescription = `
+The alsa interface allows connected plugs to access raw ALSA devices.
+
+The core snap provides the slot that is shared by all the snaps.
+`
+
+const alsaBaseDeclarationSlots = `
+  alsa:
+    allow-installation:
+      slot-snap-type:
+        - core
+    deny-auto-connection: true
+`
 
 const alsaConnectedPlugAppArmor = `
 # Description: Allow access to raw ALSA devices.
@@ -31,16 +45,21 @@ const alsaConnectedPlugAppArmor = `
 
 # Allow access to the alsa state dir
 /var/lib/alsa/{,*}         r,
+
+# Allow access to alsa /proc entries
+@{PROC}/asound/   r,
+@{PROC}/asound/** rw,
 `
 
-func NewAlsaInterface() interfaces.Interface {
-	return &commonInterface{
-		name: "alsa",
+func init() {
+	registerIface(&commonInterface{
+		name:                  "alsa",
+		summary:               alsaSummary,
+		description:           alsaDescription,
+		implicitOnCore:        true,
+		implicitOnClassic:     true,
+		baseDeclarationSlots:  alsaBaseDeclarationSlots,
 		connectedPlugAppArmor: alsaConnectedPlugAppArmor,
 		reservedForOS:         true,
-	}
-}
-
-func init() {
-	registerIface(NewAlsaInterface())
+	})
 }

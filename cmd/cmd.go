@@ -20,6 +20,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -66,7 +67,7 @@ func distroSupportsReExec() bool {
 		return false
 	}
 	switch release.ReleaseInfo.ID {
-	case "fedora", "centos", "rhel", "opensuse", "suse", "poky":
+	case "fedora", "centos", "rhel", "opensuse", "suse", "poky", "arch":
 		logger.Debugf("re-exec not supported on distro %q yet", release.ReleaseInfo.ID)
 		return false
 	}
@@ -136,6 +137,7 @@ func InternalToolPath(tool string) string {
 	}
 
 	if !strings.HasPrefix(exe, dirs.SnapMountDir) {
+		logger.Noticef("exe doesn't have snap mount dir prefix: %q vs %q", exe, dirs.SnapMountDir)
 		return distroTool
 	}
 
@@ -144,9 +146,32 @@ func InternalToolPath(tool string) string {
 	return filepath.Join(filepath.Dir(exe), tool)
 }
 
+// mustUnsetenv will os.Unsetenv the for or panic if it cannot do that
+func mustUnsetenv(key string) {
+	if err := os.Unsetenv(key); err != nil {
+		panic(fmt.Sprintf("cannot unset %s: %s", key, err))
+	}
+}
+
 // ExecInCoreSnap makes sure you're executing the binary that ships in
 // the core snap.
 func ExecInCoreSnap() {
+	// Which executable are we?
+	exe, err := os.Readlink(selfExe)
+	if err != nil {
+		return
+	}
+
+	// Special case for snapd re-execing from 2.21. In this
+	// version of snap/snapd we did set SNAP_REEXEC=0 when we
+	// re-execed. In this case we need to unset the reExecKey to
+	// ensure that subsequent run of snap/snapd (e.g. when using
+	// classic confinement) will *not* prevented from re-execing.
+	if strings.HasPrefix(exe, dirs.SnapMountDir) && !osutil.GetenvBool(reExecKey, true) {
+		mustUnsetenv(reExecKey)
+		return
+	}
+
 	// If we are asked not to re-execute use distribution packages. This is
 	// "spiritual" re-exec so use the same environment variable to decide.
 	if !osutil.GetenvBool(reExecKey, true) {
@@ -156,17 +181,12 @@ func ExecInCoreSnap() {
 
 	// Did we already re-exec?
 	if osutil.GetenvBool("SNAP_DID_REEXEC") {
+		mustUnsetenv("SNAP_DID_REEXEC")
 		return
 	}
 
 	// If the distribution doesn't support re-exec or run-from-core then don't do it.
 	if !distroSupportsReExec() {
-		return
-	}
-
-	// Which executable are we?
-	exe, err := os.Readlink(selfExe)
-	if err != nil {
 		return
 	}
 

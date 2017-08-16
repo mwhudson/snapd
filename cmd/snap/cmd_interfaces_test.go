@@ -31,44 +31,6 @@ import (
 	. "github.com/snapcore/snapd/cmd/snap"
 )
 
-func (s *SnapSuite) TestInterfacesHelp(c *C) {
-	msg := `Usage:
-  snap.test [OPTIONS] interfaces [interfaces-OPTIONS] [<snap>:<slot or plug>]
-
-The interfaces command lists interfaces available in the system.
-
-By default all slots and plugs, used and offered by all snaps, are displayed.
-
-$ snap interfaces <snap>:<slot or plug>
-
-Lists only the specified slot or plug.
-
-$ snap interfaces <snap>
-
-Lists the slots offered and plugs used by the specified snap.
-
-$ snap interfaces -i=<interface> [<snap>]
-
-Filters the complete output so only plugs and/or slots matching the provided
-details are listed.
-
-Application Options:
-      --version                    Print the version and exit
-
-Help Options:
-  -h, --help                       Show this help message
-
-[interfaces command options]
-      -i=                          Constrain listing to specific interfaces
-
-[interfaces command arguments]
-  <snap>:<slot or plug>:           Constrain listing to a specific snap or snap:name
-`
-	rest, err := Parser().ParseArgs([]string{"interfaces", "--help"})
-	c.Assert(err.Error(), Equals, msg)
-	c.Assert(rest, DeepEquals, []string{})
-}
-
 func (s *SnapSuite) TestInterfacesZeroSlotsOnePlug(c *C) {
 	s.RedirectClientToTestServer(func(w http.ResponseWriter, r *http.Request) {
 		c.Check(r.Method, Equals, "GET")
@@ -525,6 +487,51 @@ func (s *SnapSuite) TestInterfacesNothingAtAll(c *C) {
 	// command Execute returns an error.
 	c.Assert(rest, DeepEquals, []string{"interfaces"})
 	c.Assert(s.Stdout(), Equals, "")
+	c.Assert(s.Stderr(), Equals, "")
+}
+
+func (s *SnapSuite) TestInterfacesOfSpecificType(c *C) {
+	s.RedirectClientToTestServer(func(w http.ResponseWriter, r *http.Request) {
+		c.Check(r.Method, Equals, "GET")
+		c.Check(r.URL.Path, Equals, "/v2/interfaces")
+		body, err := ioutil.ReadAll(r.Body)
+		c.Check(err, IsNil)
+		c.Check(body, DeepEquals, []byte{})
+		EncodeResponseBody(c, w, map[string]interface{}{
+			"type": "sync",
+			"result": client.Interfaces{
+				Slots: []client.Slot{
+					{
+						Snap:      "cheese",
+						Name:      "photo-trigger",
+						Interface: "bool-file",
+						Label:     "Photo trigger",
+					},
+					{
+						Snap:      "wake-up-alarm",
+						Name:      "toggle",
+						Interface: "bool-file",
+						Label:     "Alarm toggle",
+					},
+					{
+						Snap:      "wake-up-alarm",
+						Name:      "snooze",
+						Interface: "bool-file",
+						Label:     "Alarm snooze",
+					},
+				},
+			},
+		})
+	})
+	rest, err := Parser().ParseArgs([]string{"interfaces", "-i", "bool-file"})
+	c.Assert(err, IsNil)
+	c.Assert(rest, DeepEquals, []string{})
+	expectedStdout := "" +
+		"Slot                  Plug\n" +
+		"cheese:photo-trigger  -\n" +
+		"wake-up-alarm:toggle  -\n" +
+		"wake-up-alarm:snooze  -\n"
+	c.Assert(s.Stdout(), Equals, expectedStdout)
 	c.Assert(s.Stderr(), Equals, "")
 }
 

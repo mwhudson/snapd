@@ -47,6 +47,7 @@ import (
 	"github.com/snapcore/snapd/overlord"
 	"github.com/snapcore/snapd/overlord/assertstate"
 	"github.com/snapcore/snapd/overlord/auth"
+	"github.com/snapcore/snapd/overlord/hookstate"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
 	"github.com/snapcore/snapd/partition"
@@ -71,6 +72,7 @@ type mgrsSuite struct {
 
 	storeSigning   *assertstest.StoreStack
 	restoreTrusted func()
+	restore        func()
 
 	devAcct *asserts.Account
 
@@ -106,6 +108,16 @@ func (ms *mgrsSuite) SetUpTest(c *C) {
 	dirs.SetRootDir(ms.tempdir)
 	err := os.MkdirAll(filepath.Dir(dirs.SnapStateFile), 0755)
 	c.Assert(err, IsNil)
+
+	oldSetupInstallHook := snapstate.SetupInstallHook
+	oldSetupRemoveHook := snapstate.SetupRemoveHook
+	snapstate.SetupRemoveHook = hookstate.SetupRemoveHook
+	snapstate.SetupInstallHook = hookstate.SetupInstallHook
+
+	ms.restore = func() {
+		snapstate.SetupRemoveHook = oldSetupRemoveHook
+		snapstate.SetupInstallHook = oldSetupInstallHook
+	}
 
 	os.Setenv("SNAPPY_SQUASHFS_UNPACK_FOR_TESTS", "1")
 	snapstate.CanAutoRefresh = nil
@@ -153,6 +165,7 @@ func (ms *mgrsSuite) SetUpTest(c *C) {
 func (ms *mgrsSuite) TearDownTest(c *C) {
 	dirs.SetRootDir("")
 	ms.restoreTrusted()
+	ms.restore()
 	os.Unsetenv("SNAPPY_SQUASHFS_UNPACK_FOR_TESTS")
 	systemd.SystemctlCmd = ms.prevctlCmd
 	ms.udev.Restore()
@@ -208,10 +221,10 @@ apps:
 	c.Assert(osutil.FileExists(filepath.Join(dirs.SnapBlobDir, "foo_x1.snap")), Equals, true)
 
 	// ensure the right unit is created
-	mup := systemd.MountUnitPath("/snap/foo/x1")
+	mup := systemd.MountUnitPath(filepath.Join(dirs.StripRootDir(dirs.SnapMountDir), "foo/x1"))
 	content, err := ioutil.ReadFile(mup)
 	c.Assert(err, IsNil)
-	c.Assert(string(content), Matches, "(?ms).*^Where=/snap/foo/x1")
+	c.Assert(string(content), Matches, fmt.Sprintf("(?ms).*^Where=%s/foo/x1", dirs.StripRootDir(dirs.SnapMountDir)))
 	c.Assert(string(content), Matches, "(?ms).*^What=/var/lib/snapd/snaps/foo_x1.snap")
 
 }
@@ -250,7 +263,7 @@ apps:
 
 	// snap file and its mount
 	c.Assert(osutil.FileExists(filepath.Join(dirs.SnapBlobDir, "foo_x1.snap")), Equals, false)
-	mup := systemd.MountUnitPath("/snap/foo/x1")
+	mup := systemd.MountUnitPath(filepath.Join(dirs.StripRootDir(dirs.SnapMountDir), "foo/x1"))
 	c.Assert(osutil.FileExists(mup), Equals, false)
 }
 
@@ -379,7 +392,7 @@ func (ms *mgrsSuite) mockStore(c *C) *httptest.Server {
 			w.Write(asserts.Encode(a))
 			return
 		case "details":
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(200)
 			io.WriteString(w, fillHit(comps[2]))
 		case "metadata":
 			dec := json.NewDecoder(r.Body)
@@ -401,7 +414,7 @@ func (ms *mgrsSuite) mockStore(c *C) *httptest.Server {
 				}
 				hits = append(hits, json.RawMessage(fillHit(name)))
 			}
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(200)
 			output, err := json.Marshal(map[string]interface{}{
 				"_embedded": map[string]interface{}{
 					"clickindex:package": hits,
@@ -642,10 +655,10 @@ apps:
 	c.Assert(osutil.FileExists(filepath.Join(dirs.SnapBlobDir, "foo_55.snap")), Equals, true)
 
 	// ensure the right unit is created
-	mup := systemd.MountUnitPath("/snap/foo/55")
+	mup := systemd.MountUnitPath(filepath.Join(dirs.StripRootDir(dirs.SnapMountDir), "foo/55"))
 	content, err := ioutil.ReadFile(mup)
 	c.Assert(err, IsNil)
-	c.Assert(string(content), Matches, "(?ms).*^Where=/snap/foo/55")
+	c.Assert(string(content), Matches, fmt.Sprintf("(?ms).*^Where=%s/foo/55", dirs.StripRootDir(dirs.SnapMountDir)))
 	c.Assert(string(content), Matches, "(?ms).*^What=/var/lib/snapd/snaps/foo_55.snap")
 }
 
@@ -1316,6 +1329,105 @@ apps:
 	dest, err = os.Readlink(app2Alias)
 	c.Assert(err, IsNil)
 	c.Check(dest, Equals, "foo.app2")
+}
+
+func (ms *mgrsSuite) TestHappyRemoteInstallAndUpdateAutoAliasesUnaliased(c *C) {
+	ms.prereqSnapAssertions(c, map[string]interface{}{
+		"snap-name": "foo",
+		"aliases": []interface{}{
+			map[string]interface{}{"name": "app1", "target": "app1"},
+		},
+	})
+
+	fooYaml := `name: foo
+version: @VERSION@
+apps:
+ app1:
+  command: bin/app1
+ app2:
+  command: bin/app2
+`
+
+	fooPath, _ := ms.makeStoreTestSnap(c, strings.Replace(fooYaml, "@VERSION@", "1.0", -1), "10")
+	ms.serveSnap(fooPath, "10")
+
+	mockServer := ms.mockStore(c)
+	defer mockServer.Close()
+
+	st := ms.o.State()
+	st.Lock()
+	defer st.Unlock()
+
+	ts, err := snapstate.Install(st, "foo", "stable", snap.R(0), 0, snapstate.Flags{Unaliased: true})
+	c.Assert(err, IsNil)
+	chg := st.NewChange("install-snap", "...")
+	chg.AddAll(ts)
+
+	st.Unlock()
+	err = ms.o.Settle()
+	st.Lock()
+	c.Assert(err, IsNil)
+
+	c.Assert(chg.Status(), Equals, state.DoneStatus, Commentf("install-snap change failed with: %v", chg.Err()))
+
+	info, err := snapstate.CurrentInfo(st, "foo")
+	c.Assert(err, IsNil)
+	c.Check(info.Revision, Equals, snap.R(10))
+	c.Check(info.Version, Equals, "1.0")
+
+	var snapst snapstate.SnapState
+	err = snapstate.Get(st, "foo", &snapst)
+	c.Assert(err, IsNil)
+	c.Check(snapst.AutoAliasesDisabled, Equals, true)
+	c.Check(snapst.Aliases, DeepEquals, map[string]*snapstate.AliasTarget{
+		"app1": {Auto: "app1"},
+	})
+
+	app1Alias := filepath.Join(dirs.SnapBinariesDir, "app1")
+	c.Check(osutil.IsSymlink(app1Alias), Equals, false)
+
+	ms.prereqSnapAssertions(c, map[string]interface{}{
+		"snap-name": "foo",
+		"aliases": []interface{}{
+			map[string]interface{}{"name": "app2", "target": "app2"},
+		},
+		"revision": "1",
+	})
+
+	// new foo version/revision
+	fooPath, _ = ms.makeStoreTestSnap(c, strings.Replace(fooYaml, "@VERSION@", "1.5", -1), "15")
+	ms.serveSnap(fooPath, "15")
+
+	// refresh foo
+	ts, err = snapstate.Update(st, "foo", "stable", snap.R(0), 0, snapstate.Flags{})
+	c.Assert(err, IsNil)
+	chg = st.NewChange("upgrade-snap", "...")
+	chg.AddAll(ts)
+
+	st.Unlock()
+	err = ms.o.Settle()
+	st.Lock()
+	c.Assert(err, IsNil)
+
+	c.Assert(chg.Status(), Equals, state.DoneStatus, Commentf("upgrade-snap change failed with: %v", chg.Err()))
+
+	info, err = snapstate.CurrentInfo(st, "foo")
+	c.Assert(err, IsNil)
+	c.Check(info.Revision, Equals, snap.R(15))
+	c.Check(info.Version, Equals, "1.5")
+
+	var snapst2 snapstate.SnapState
+	err = snapstate.Get(st, "foo", &snapst2)
+	c.Assert(err, IsNil)
+	c.Check(snapst2.AutoAliasesDisabled, Equals, true)
+	c.Check(snapst2.Aliases, DeepEquals, map[string]*snapstate.AliasTarget{
+		"app2": {Auto: "app2"},
+	})
+
+	c.Check(osutil.IsSymlink(app1Alias), Equals, false)
+
+	app2Alias := filepath.Join(dirs.SnapBinariesDir, "app2")
+	c.Check(osutil.IsSymlink(app2Alias), Equals, false)
 }
 
 func (ms *mgrsSuite) TestHappyOrthogonalRefreshAutoAliases(c *C) {

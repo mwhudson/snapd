@@ -19,9 +19,15 @@
 
 package builtin
 
-import (
-	"github.com/snapcore/snapd/interfaces"
-)
+const networkObserveSummary = `allows querying network status`
+
+const networkObserveBaseDeclarationSlots = `
+  network-observe:
+    allow-installation:
+      slot-snap-type:
+        - core
+    deny-auto-connection: true
+`
 
 // http://bazaar.launchpad.net/~ubuntu-security/ubuntu-core-security/trunk/view/head:/data/apparmor/policygroups/ubuntu-core/16.04/network-observe
 const networkObserveConnectedPlugAppArmor = `
@@ -35,6 +41,26 @@ const networkObserveConnectedPlugAppArmor = `
 #capability net_admin,
 
 #include <abstractions/nameservice>
+
+# systemd-resolved (not yet included in nameservice abstraction)
+#
+# Allow access to the safe members of the systemd-resolved D-Bus API:
+#
+#   https://www.freedesktop.org/wiki/Software/systemd/resolved/
+#
+# This API may be used directly over the D-Bus system bus or it may be used
+# indirectly via the nss-resolve plugin:
+#
+#   https://www.freedesktop.org/software/systemd/man/nss-resolve.html
+#
+#include <abstractions/dbus-strict>
+dbus send
+     bus=system
+     path="/org/freedesktop/resolve1"
+     interface="org.freedesktop.resolve1.Manager"
+     member="Resolve{Address,Hostname,Record,Service}"
+     peer=(name="org.freedesktop.resolve1"),
+
 #include <abstractions/ssl_certs>
 
 @{PROC}/@{pid}/net/ r,
@@ -115,16 +141,15 @@ socket AF_NETLINK - NETLINK_ROUTE
 socket AF_NETLINK - NETLINK_GENERIC
 `
 
-// NewNetworkObserveInterface returns a new "network-observe" interface.
-func NewNetworkObserveInterface() interfaces.Interface {
-	return &commonInterface{
-		name: "network-observe",
+func init() {
+	registerIface(&commonInterface{
+		name:                  "network-observe",
+		summary:               networkObserveSummary,
+		implicitOnCore:        true,
+		implicitOnClassic:     true,
+		baseDeclarationSlots:  networkObserveBaseDeclarationSlots,
 		connectedPlugAppArmor: networkObserveConnectedPlugAppArmor,
 		connectedPlugSecComp:  networkObserveConnectedPlugSecComp,
 		reservedForOS:         true,
-	}
-}
-
-func init() {
-	registerIface(NewNetworkObserveInterface())
+	})
 }

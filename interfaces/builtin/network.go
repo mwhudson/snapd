@@ -19,12 +19,45 @@
 
 package builtin
 
-import "github.com/snapcore/snapd/interfaces"
+const networkSummary = `allows access to the network`
+
+const networkBaseDeclarationSlots = `
+  network:
+    allow-installation:
+      slot-snap-type:
+        - core
+`
+
+const networkDescription = `
+The network interface allows connected plugs to access the network as a client.
+
+The core snap provides the slot that is shared by all the snaps.
+`
 
 // http://bazaar.launchpad.net/~ubuntu-security/ubuntu-core-security/trunk/view/head:/data/apparmor/policygroups/ubuntu-core/16.04/network
 const networkConnectedPlugAppArmor = `
 # Description: Can access the network as a client.
 #include <abstractions/nameservice>
+
+# systemd-resolved (not yet included in nameservice abstraction)
+#
+# Allow access to the safe members of the systemd-resolved D-Bus API:
+#
+#   https://www.freedesktop.org/wiki/Software/systemd/resolved/
+#
+# This API may be used directly over the D-Bus system bus or it may be used
+# indirectly via the nss-resolve plugin:
+#
+#   https://www.freedesktop.org/software/systemd/man/nss-resolve.html
+#
+#include <abstractions/dbus-strict>
+dbus send
+     bus=system
+     path="/org/freedesktop/resolve1"
+     interface="org.freedesktop.resolve1.Manager"
+     member="Resolve{Address,Hostname,Record,Service}"
+     peer=(name="org.freedesktop.resolve1"),
+
 #include <abstractions/ssl_certs>
 
 @{PROC}/sys/net/core/somaxconn r,
@@ -44,16 +77,16 @@ shutdown
 socket AF_NETLINK - NETLINK_ROUTE
 `
 
-// NewNetworkInterface returns a new "network" interface.
-func NewNetworkInterface() interfaces.Interface {
-	return &commonInterface{
-		name: "network",
+func init() {
+	registerIface(&commonInterface{
+		name:                  "network",
+		summary:               networkSummary,
+		description:           networkDescription,
+		implicitOnCore:        true,
+		implicitOnClassic:     true,
+		baseDeclarationSlots:  networkBaseDeclarationSlots,
 		connectedPlugAppArmor: networkConnectedPlugAppArmor,
 		connectedPlugSecComp:  networkConnectedPlugSecComp,
 		reservedForOS:         true,
-	}
-}
-
-func init() {
-	registerIface(NewNetworkInterface())
+	})
 }
