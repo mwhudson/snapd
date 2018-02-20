@@ -18,12 +18,13 @@
 #include "config.h"
 #endif
 
+#include <errno.h>
 #include <glob.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "../libsnap-confine-private/cgroup-freezer-support.h"
@@ -48,7 +49,7 @@
 // sc_maybe_fixup_permissions fixes incorrect permissions
 // inside the mount namespace for /var/lib. Before 1ccce4
 // this directory was created with permissions 1777.
-void sc_maybe_fixup_permissions()
+static void sc_maybe_fixup_permissions(void)
 {
 	struct stat buf;
 	if (stat("/var/lib", &buf) != 0) {
@@ -68,7 +69,7 @@ void sc_maybe_fixup_permissions()
 // that cause libudev on 16.04 to fail with "udev_enumerate_scan failed".
 // See also:
 // https://forum.snapcraft.io/t/weird-udev-enumerate-error/2360/17
-void sc_maybe_fixup_udev()
+static void sc_maybe_fixup_udev(void)
 {
 	glob_t glob_res SC_CLEANUP(globfree) = {
 	.gl_pathv = NULL,.gl_pathc = 0,.gl_offs = 0,};
@@ -222,7 +223,19 @@ int main(int argc, char **argv)
 			debug("initializing mount namespace: %s", snap_name);
 			struct sc_ns_group *group = NULL;
 			group = sc_open_ns_group(snap_name, 0);
-			sc_create_or_join_ns_group(group, &apparmor);
+			if (sc_create_or_join_ns_group(group, &apparmor,
+						       base_snap_name,
+						       snap_name) == EAGAIN) {
+				// If the namespace was stale and was discarded we just need to
+				// try again. Since this is done with the per-snap lock held
+				// there are no races here.
+				if (sc_create_or_join_ns_group(group, &apparmor,
+							       base_snap_name,
+							       snap_name) ==
+				    EAGAIN) {
+					die("unexpectedly the namespace needs to be discarded again");
+				}
+			}
 			if (sc_should_populate_ns_group(group)) {
 				sc_populate_mount_ns(base_snap_name, snap_name);
 				sc_preserve_populated_ns_group(group);

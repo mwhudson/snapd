@@ -32,6 +32,28 @@ type ValidateSuite struct{}
 
 var _ = Suite(&ValidateSuite{})
 
+func createSampleApp() *AppInfo {
+	socket := &SocketInfo{
+		Name:         "sock",
+		ListenStream: "$SNAP_COMMON/socket",
+	}
+	app := &AppInfo{
+		Snap: &Info{
+			SideInfo: SideInfo{
+				RealName: "mysnap",
+				Revision: R(20),
+			},
+		},
+		Name:  "foo",
+		Plugs: map[string]*PlugInfo{"network-bind": {}},
+		Sockets: map[string]*SocketInfo{
+			"sock": socket,
+		},
+	}
+	socket.App = app
+	return app
+}
+
 func (s *ValidateSuite) TestValidateName(c *C) {
 	validNames := []string{
 		"a", "aa", "aaa", "aaaa",
@@ -129,6 +151,165 @@ func (s *ValidateSuite) TestValidateAppName(c *C) {
 	for _, name := range invalidAppNames {
 		err := ValidateApp(&AppInfo{Name: name})
 		c.Assert(err, ErrorMatches, `cannot have ".*" as app name.*`)
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSockets(c *C) {
+	app := createSampleApp()
+	app.Sockets["sock"].SocketMode = 0600
+	c.Check(ValidateApp(app), IsNil)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsEmptyPermsOk(c *C) {
+	app := createSampleApp()
+	c.Check(ValidateApp(app), IsNil)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsWrongPerms(c *C) {
+	app := createSampleApp()
+	app.Sockets["sock"].SocketMode = 1234
+	err := ValidateApp(app)
+	c.Assert(err, ErrorMatches, `cannot use socket mode: 2322`)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsMissingNetworkBindPlug(c *C) {
+	app := createSampleApp()
+	delete(app.Plugs, "network-bind")
+	err := ValidateApp(app)
+	c.Assert(
+		err, ErrorMatches,
+		`"network-bind" interface plug is required when sockets are used`)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsEmptyListenStream(c *C) {
+	app := createSampleApp()
+	app.Sockets["sock"].ListenStream = ""
+	err := ValidateApp(app)
+	c.Assert(err, ErrorMatches, `socket "sock" must define "listen-stream"`)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidName(c *C) {
+	app := createSampleApp()
+	app.Sockets["sock"].Name = "invalid name"
+	err := ValidateApp(app)
+	c.Assert(err, ErrorMatches, `invalid socket name: "invalid name"`)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsValidListenStreamAddresses(c *C) {
+	app := createSampleApp()
+	validListenAddresses := []string{
+		// socket paths using variables as prefix
+		"$SNAP_DATA/my.socket",
+		"$SNAP_COMMON/my.socket",
+		// abstract sockets
+		"@snap.mysnap.my.socket",
+		// addresses and ports
+		"1",
+		"1023",
+		"1024",
+		"65535",
+		"127.0.0.1:8080",
+		"[::]:8080",
+		"[::1]:8080",
+	}
+	socket := app.Sockets["sock"]
+	for _, validAddress := range validListenAddresses {
+		socket.ListenStream = validAddress
+		err := ValidateApp(app)
+		c.Check(err, IsNil, Commentf(validAddress))
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamPath(c *C) {
+	app := createSampleApp()
+	invalidListenAddresses := []string{
+		// socket paths out of the snap dirs
+		"/some/path/my.socket",
+		"/var/snap/mysnap/20/my.socket", // path is correct but has hardcoded prefix
+	}
+	socket := app.Sockets["sock"]
+	for _, invalidAddress := range invalidListenAddresses {
+		socket.ListenStream = invalidAddress
+		err := ValidateApp(app)
+		c.Assert(err, ErrorMatches, `socket "sock" has invalid "listen-stream": only.*are allowed`)
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamPathContainsDots(c *C) {
+	app := createSampleApp()
+	app.Sockets["sock"].ListenStream = "$SNAP/../some.path"
+	err := ValidateApp(app)
+	c.Assert(
+		err, ErrorMatches,
+		`socket "sock" has invalid "listen-stream": "\$SNAP/../some.path" should be written as "some.path"`)
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamPathPrefix(c *C) {
+	app := createSampleApp()
+	invalidListenAddresses := []string{
+		"$SNAP/my.socket", // snap dir is not writable
+		"$SOMEVAR/my.socket",
+	}
+	socket := app.Sockets["sock"]
+	for _, invalidAddress := range invalidListenAddresses {
+		socket.ListenStream = invalidAddress
+		err := ValidateApp(app)
+		c.Assert(
+			err, ErrorMatches,
+			`socket "sock" has invalid "listen-stream": only \$SNAP_DATA and \$SNAP_COMMON prefixes are allowed`)
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamAbstractSocket(c *C) {
+	app := createSampleApp()
+	invalidListenAddresses := []string{
+		"@snap.mysnap",
+		"@snap.mysnap\000.foo",
+		"@snap.notmysnap.my.socket",
+		"@some.other.name",
+		"@snap.myappiswrong.foo",
+	}
+	socket := app.Sockets["sock"]
+	for _, invalidAddress := range invalidListenAddresses {
+		socket.ListenStream = invalidAddress
+		err := ValidateApp(app)
+		c.Assert(err, ErrorMatches, `socket "sock" path for "listen-stream" must be prefixed with.*`)
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamAddress(c *C) {
+	app := createSampleApp()
+	invalidListenAddresses := []string{
+		"10.0.1.1:8080",
+		"[fafa::baba]:8080",
+		"127.0.0.1\000:8080",
+		"127.0.0.1::8080",
+	}
+	socket := app.Sockets["sock"]
+	for _, invalidAddress := range invalidListenAddresses {
+		socket.ListenStream = invalidAddress
+		err := ValidateApp(app)
+		c.Assert(err, ErrorMatches, `socket "sock" has invalid "listen-stream" address.*`)
+	}
+}
+
+func (s *ValidateSuite) TestValidateAppSocketsInvalidListenStreamPort(c *C) {
+	app := createSampleApp()
+	invalidPorts := []string{
+		"0",
+		"66536",
+		"-8080",
+		"12312345345",
+		"[::]:-123",
+		"[::1]:3452345234",
+		"invalid",
+		"[::]:invalid",
+	}
+	socket := app.Sockets["sock"]
+	for _, invalidPort := range invalidPorts {
+		socket.ListenStream = invalidPort
+		err := ValidateApp(app)
+		c.Assert(err, ErrorMatches, `socket "sock" has invalid "listen-stream" port number.*`)
 	}
 }
 
@@ -335,44 +516,255 @@ func (s *ValidateSuite) TestValidateAlias(c *C) {
 }
 
 func (s *ValidateSuite) TestValidateLayout(c *C) {
+	si := &Info{SuggestedName: "foo"}
 	// Several invalid layouts.
-	c.Check(ValidateLayout(&Layout{}),
-		ErrorMatches, "cannot accept layout with empty path")
-	c.Check(ValidateLayout(&Layout{Path: "/foo"}),
-		ErrorMatches, `cannot determine layout for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Bind: "/bar", Type: "tmpfs"}),
-		ErrorMatches, `cannot accept conflicting layout for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Bind: "/bar", Symlink: "/froz"}),
-		ErrorMatches, `cannot accept conflicting layout for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Type: "tmpfs", Symlink: "/froz"}),
-		ErrorMatches, `cannot accept conflicting layout for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Type: "ext4"}),
-		ErrorMatches, `cannot accept filesystem "ext4" for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo/bar", Type: "tmpfs", User: "foo"}),
-		ErrorMatches, `cannot accept user "foo" for "/foo/bar"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo/bar", Type: "tmpfs", Group: "foo"}),
-		ErrorMatches, `cannot accept group "foo" for "/foo/bar"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Type: "tmpfs", Mode: 01755}),
-		ErrorMatches, `cannot accept mode 01755 for "/foo"`)
-	c.Check(ValidateLayout(&Layout{Path: "$FOO", Type: "tmpfs"}),
-		ErrorMatches, `cannot accept layout of "\$FOO": reference to unknown variable "\$FOO"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Bind: "$BAR"}),
-		ErrorMatches, `cannot accept layout of "/foo": reference to unknown variable "\$BAR"`)
-	c.Check(ValidateLayout(&Layout{Path: "/foo", Symlink: "$BAR"}),
-		ErrorMatches, `cannot accept layout of "/foo": reference to unknown variable "\$BAR"`)
+	c.Check(ValidateLayout(&Layout{Snap: si}, nil),
+		ErrorMatches, "layout cannot use an empty path")
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo"}, nil),
+		ErrorMatches, `layout "/foo" must define a bind mount, a filesystem mount or a symlink`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Bind: "/bar", Type: "tmpfs"}, nil),
+		ErrorMatches, `layout "/foo" must define a bind mount, a filesystem mount or a symlink`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Bind: "/bar", Symlink: "/froz"}, nil),
+		ErrorMatches, `layout "/foo" must define a bind mount, a filesystem mount or a symlink`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Type: "tmpfs", Symlink: "/froz"}, nil),
+		ErrorMatches, `layout "/foo" must define a bind mount, a filesystem mount or a symlink`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Type: "ext4"}, nil),
+		ErrorMatches, `layout "/foo" uses invalid filesystem "ext4"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo/bar", Type: "tmpfs", User: "foo"}, nil),
+		ErrorMatches, `layout "/foo/bar" uses invalid user "foo"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo/bar", Type: "tmpfs", Group: "foo"}, nil),
+		ErrorMatches, `layout "/foo/bar" uses invalid group "foo"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Type: "tmpfs", Mode: 02755}, nil),
+		ErrorMatches, `layout "/foo" uses invalid mode 02755`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "$FOO", Type: "tmpfs"}, nil),
+		ErrorMatches, `layout "\$FOO" uses invalid mount point: reference to unknown variable "\$FOO"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Bind: "$BAR"}, nil),
+		ErrorMatches, `layout "/foo" uses invalid bind mount source "\$BAR": reference to unknown variable "\$BAR"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "$SNAP/evil", Bind: "/etc"}, nil),
+		ErrorMatches, `layout "\$SNAP/evil" uses invalid bind mount source "/etc": must start with \$SNAP, \$SNAP_DATA or \$SNAP_COMMON`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Symlink: "$BAR"}, nil),
+		ErrorMatches, `layout "/foo" uses invalid symlink old name "\$BAR": reference to unknown variable "\$BAR"`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "$SNAP/evil", Symlink: "/etc"}, nil),
+		ErrorMatches, `layout "\$SNAP/evil" uses invalid symlink old name "/etc": must start with \$SNAP, \$SNAP_DATA or \$SNAP_COMMON`)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo/bar", Bind: "$SNAP/bar/foo"}, []string{"/foo"}),
+		ErrorMatches, `layout "/foo/bar" underneath prior layout item "/foo"`)
 	// Several valid layouts.
-	c.Check(ValidateLayout(&Layout{Path: "/tmp", Type: "tmpfs"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/usr", Bind: "$SNAP/usr"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/var", Bind: "$SNAP_DATA/var"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/var", Bind: "$SNAP_COMMON/var"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/etc/foo.conf", Symlink: "$SNAP_DATA/etc/foo.conf"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/a/b", Type: "tmpfs", User: "nobody"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/a/b", Type: "tmpfs", User: "root"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/a/b", Type: "tmpfs", Group: "nobody"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/a/b", Type: "tmpfs", Group: "root"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/a/b", Type: "tmpfs", Mode: 0655}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/usr", Symlink: "$SNAP/usr"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/var", Symlink: "$SNAP_DATA/var"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "/var", Symlink: "$SNAP_COMMON/var"}), IsNil)
-	c.Check(ValidateLayout(&Layout{Path: "$SNAP/data", Symlink: "$SNAP_DATA"}), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/foo", Type: "tmpfs", Mode: 01755}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/tmp", Type: "tmpfs"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/usr", Bind: "$SNAP/usr"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/var", Bind: "$SNAP_DATA/var"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/var", Bind: "$SNAP_COMMON/var"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/etc/foo.conf", Symlink: "$SNAP_DATA/etc/foo.conf"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/a/b", Type: "tmpfs", User: "root"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/a/b", Type: "tmpfs", Group: "root"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/a/b", Type: "tmpfs", Mode: 0655}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/usr", Symlink: "$SNAP/usr"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/var", Symlink: "$SNAP_DATA/var"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "/var", Symlink: "$SNAP_COMMON/var"}, nil), IsNil)
+	c.Check(ValidateLayout(&Layout{Snap: si, Path: "$SNAP/data", Symlink: "$SNAP_DATA"}, nil), IsNil)
+}
+
+func (s *ValidateSuite) TestValidateSocketName(c *C) {
+	validNames := []string{
+		"a", "aa", "aaa", "aaaa",
+		"a-a", "aa-a", "a-aa", "a-b-c",
+		"a0", "a-0", "a-0a",
+		"01game", "1-or-2",
+	}
+	for _, name := range validNames {
+		err := ValidateSocketName(name)
+		c.Assert(err, IsNil)
+	}
+	invalidNames := []string{
+		// name cannot be empty
+		"",
+		// dashes alone are not a name
+		"-", "--",
+		// double dashes in a name are not allowed
+		"a--a",
+		// name should not end with a dash
+		"a-",
+		// name cannot have any spaces in it
+		"a ", " a", "a a",
+		// a number alone is not a name
+		"0", "123",
+		// identifier must be plain ASCII
+		"日本語", "한글", "ру́сский язы́к",
+		// no null chars in the string are allowed
+		"aa-a\000-b",
+	}
+	for _, name := range invalidNames {
+		err := ValidateSocketName(name)
+		c.Assert(err, ErrorMatches, `invalid socket name: ".*"`)
+	}
+}
+
+func (s *YamlSuite) TestValidateAppStartupOrder(c *C) {
+	meta := []byte(`
+name: foo
+version: 1.0
+`)
+	fooAfterBaz := []byte(`
+apps:
+  foo:
+    after: [baz]
+    daemon: simple
+  bar:
+    daemon: forking
+`)
+	fooBeforeBaz := []byte(`
+apps:
+  foo:
+    before: [baz]
+    daemon: simple
+  bar:
+    daemon: forking
+`)
+
+	fooNotADaemon := []byte(`
+apps:
+  foo:
+    after: [bar]
+  bar:
+    daemon: forking
+`)
+
+	fooBarNotADaemon := []byte(`
+apps:
+  foo:
+    after: [bar]
+    daemon: forking
+  bar:
+`)
+	fooSelfCycle := []byte(`
+apps:
+  foo:
+    after: [foo]
+    daemon: forking
+  bar:
+`)
+	// cycle between foo and bar
+	badOrder1 := []byte(`
+apps:
+ foo:
+   after: [bar]
+   daemon: forking
+ bar:
+   after: [foo]
+   daemon: forking
+`)
+	// conflicting schedule for baz
+	badOrder2 := []byte(`
+apps:
+ foo:
+   before: [bar]
+   daemon: forking
+ bar:
+   after: [foo]
+   daemon: forking
+ baz:
+   before: [foo]
+   after: [bar]
+   daemon: forking
+`)
+	// conflicting schedule for baz
+	badOrder3Cycle := []byte(`
+apps:
+ foo:
+   before: [bar]
+   after: [zed]
+   daemon: forking
+ bar:
+   before: [baz]
+   daemon: forking
+ baz:
+   before: [zed]
+   daemon: forking
+ zed:
+   daemon: forking
+`)
+	goodOrder1 := []byte(`
+apps:
+ foo:
+   after: [bar, zed]
+   daemon: oneshot
+ bar:
+   before: [foo]
+   daemon: dbus
+ baz:
+   after: [foo]
+   daemon: forking
+ zed:
+   daemon: dbus
+`)
+	goodOrder2 := []byte(`
+apps:
+ foo:
+   after: [baz]
+   daemon: oneshot
+ bar:
+   before: [baz]
+   daemon: dbus
+ baz:
+   daemon: forking
+ zed:
+   daemon: dbus
+   after: [foo, bar, baz]
+`)
+
+	tcs := []struct {
+		name string
+		desc []byte
+		err  string
+	}{{
+		name: "foo after baz",
+		desc: fooAfterBaz,
+		err:  `application "foo" refers to missing application "baz" in before/after`,
+	}, {
+		name: "foo before baz",
+		desc: fooBeforeBaz,
+		err:  `application "foo" refers to missing application "baz" in before/after`,
+	}, {
+		name: "foo not a daemon",
+		desc: fooNotADaemon,
+		err:  `cannot define before/after in application "foo" as it's not a service`,
+	}, {
+		name: "foo wants bar, bar not a daemon",
+		desc: fooBarNotADaemon,
+		err:  `application "foo" refers to non-service application "bar" in before/after`,
+	}, {
+		name: "bad order 1",
+		desc: badOrder1,
+		err:  `applications are part of a before/after cycle: (foo, bar)|(bar, foo)`,
+	}, {
+		name: "bad order 2",
+		desc: badOrder2,
+		err:  `applications are part of a before/after cycle: ((foo|bar|baz)(, )?){3}`,
+	}, {
+		name: "bad order 3 - cycle",
+		desc: badOrder3Cycle,
+		err:  `applications are part of a before/after cycle: ((foo|bar|baz|zed)(, )?){4}`,
+	}, {
+		name: "all good, 3 apps",
+		desc: goodOrder1,
+	}, {
+		name: "all good, 4 apps",
+		desc: goodOrder2,
+	}, {
+		name: "self cycle",
+		desc: fooSelfCycle,
+		err:  `applications are part of a before/after cycle: foo`},
+	}
+	for _, tc := range tcs {
+		c.Logf("trying %q", tc.name)
+		info, err := InfoFromSnapYaml(append(meta, tc.desc...))
+		c.Assert(err, IsNil)
+
+		err = Validate(info)
+		if tc.err != "" {
+			c.Assert(err, ErrorMatches, tc.err)
+		} else {
+			c.Assert(err, IsNil)
+		}
+	}
 }

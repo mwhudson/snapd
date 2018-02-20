@@ -46,13 +46,13 @@ func init() {
 	// set User-Agent for when 'snap' talks to the store directly (snap download etc...)
 	httputil.SetUserAgentFromVersion(cmd.Version, "snap")
 
-	// plug/slot sanitization not used nor possible from snap command, make it no-op
-	snap.SanitizePlugsSlots = func(snapInfo *snap.Info) {}
-
 	if osutil.GetenvBool("SNAPD_DEBUG") || osutil.GetenvBool("SNAPPY_TESTING") {
 		// in tests or when debugging, enforce the "tidy" lint checks
 		noticef = logger.Panicf
 	}
+
+	// plug/slot sanitization not used nor possible from snap command, make it no-op
+	snap.SanitizePlugsSlots = func(snapInfo *snap.Info) {}
 }
 
 var (
@@ -279,7 +279,29 @@ func resolveApp(snapApp string) (string, error) {
 func main() {
 	cmd.ExecInCoreSnap()
 
-	// magic \o/
+	// check for magic symlink to /usr/bin/snap:
+	// 1. symlink from command-not-found to /usr/bin/snap: run c-n-f
+	if os.Args[0] == filepath.Join(dirs.GlobalRootDir, "/usr/lib/command-not-found") {
+		cmd := &cmdAdviseSnap{
+			Command: true,
+			Format:  "pretty",
+		}
+		// the bash.bashrc handler runs:
+		//    /usr/lib/command-not-found -- "$1"
+		// so skip over any "--"
+		for _, arg := range os.Args[1:] {
+			if arg != "--" {
+				cmd.Positionals.CommandOrPkg = arg
+				break
+			}
+		}
+		if err := cmd.Execute(nil); err != nil {
+			fmt.Fprintf(Stderr, "%s\n", err)
+		}
+		return
+	}
+
+	// 2. symlink from /snap/bin/$foo to /usr/bin/snap: run snapApp
 	snapApp := filepath.Base(os.Args[0])
 	if osutil.IsSymlink(filepath.Join(dirs.SnapBinariesDir, snapApp)) {
 		var err error

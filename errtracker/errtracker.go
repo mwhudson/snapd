@@ -27,7 +27,9 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/mgo.v2/bson"
@@ -91,8 +93,13 @@ func snapConfineProfileDigest(suffix string) string {
 	return fmt.Sprintf("%x", md5.Sum(profileText))
 }
 
-func didSnapdReExec() string {
-	if osutil.GetenvBool("SNAP_DID_REEXEC") {
+var didSnapdReExec = func() string {
+	// TODO: move this into osutil.Reexeced() ?
+	exe, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return "unknown"
+	}
+	if strings.HasPrefix(exe, dirs.SnapMountDir) {
 		return "yes"
 	}
 	return "no"
@@ -119,6 +126,15 @@ func ReportRepair(repair, errMsg, dupSig string, extra map[string]string) (strin
 	extra["Repair"] = repair
 
 	return report(errMsg, dupSig, extra)
+}
+
+func detectVirt() string {
+	cmd := exec.Command("systemd-detect-virt")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func report(errMsg, dupSig string, extra map[string]string) (string, error) {
@@ -154,6 +170,7 @@ func report(errMsg, dupSig string, extra map[string]string) (string, error) {
 	if coreBuildID == "" {
 		coreBuildID = "unknown"
 	}
+	detectedVirt := detectVirt()
 
 	report := map[string]string{
 		"Architecture":       arch.UbuntuArchitecture(),
@@ -174,6 +191,7 @@ func report(errMsg, dupSig string, extra map[string]string) (string, error) {
 			report[k] = v
 		}
 	}
+	report["DetectedVirt"] = detectedVirt
 
 	// include md5 hashes of the apparmor conffile for easier debbuging
 	// of not-updated snap-confine apparmor profiles

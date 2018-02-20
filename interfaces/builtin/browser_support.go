@@ -25,6 +25,7 @@ import (
 	"github.com/snapcore/snapd/interfaces"
 	"github.com/snapcore/snapd/interfaces/apparmor"
 	"github.com/snapcore/snapd/interfaces/seccomp"
+	"github.com/snapcore/snapd/snap"
 )
 
 const browserSupportSummary = `allows access to various APIs needed by modern web browsers`
@@ -35,6 +36,9 @@ const browserSupportBaseDeclarationSlots = `
       slot-snap-type:
         - core
     deny-connection:
+      plug-attributes:
+        allow-sandbox: true
+    deny-auto-connection:
       plug-attributes:
         allow-sandbox: true
 `
@@ -57,6 +61,7 @@ owner /var/tmp/etilqs_* rw,
 # packaging adjusted to use LD_PRELOAD technique from LP: #1577514
 owner /{dev,run}/shm/{,.}org.chromium.* mrw,
 owner /{dev,run}/shm/{,.}com.google.Chrome.* mrw,
+owner /{dev,run}/shm/.io.nwjs.* mrw,
 
 # Chrome's Singleton API sometimes causes an ouid/fsuid mismatch denial, so
 # for now, allow non-owner read on the singleton socket (LP: #1731012). See
@@ -89,6 +94,15 @@ deny @{PROC}/@{pid}/attr/current r,
 # warning and the noisy AppArmor denial.
 owner @{PROC}/@{pid}/mounts r,
 owner @{PROC}/@{pid}/mountinfo r,
+
+# Since snapd still uses SECCOMP_RET_KILL, we have added a workaround rule to
+# allow mknod on character devices since chromium unconditionally performs
+# a mknod() to create the /dev/nvidiactl device, regardless of if it exists or
+# not or if the process has CAP_MKNOD or not. Since we don't want to actually
+# grant the ability to create character devices, explicitly deny the
+# capability. When snapd uses SECCOMP_RET_ERRNO, we can remove this rule.
+# https://forum.snapcraft.io/t/call-for-testing-chromium-62-0-3202-62/2569/46
+deny capability mknod,
 `
 
 const browserSupportConnectedPlugAppArmorWithoutSandbox = `
@@ -243,6 +257,17 @@ accept4
 # TODO: fine-tune when seccomp arg filtering available in stable distro
 # releases
 setpriority
+
+# Since snapd still uses SECCOMP_RET_KILL, add a workaround rule to allow mknod
+# on character devices since chromium unconditionally performs a mknod() to
+# create the /dev/nvidiactl device, regardless of if it exists or not or if the
+# process has CAP_MKNOD or not. Since we don't want to actually grant the
+# ability to create character devices, we added an explicit deny AppArmor rule
+# for this capability. When snapd uses SECCOMP_RET_ERRNO, we can remove this
+# rule.
+# https://forum.snapcraft.io/t/call-for-testing-chromium-62-0-3202-62/2569/46
+mknod - |S_IFCHR -
+mknodat - - |S_IFCHR -
 `
 
 const browserSupportConnectedPlugSecCompWithSandbox = `
@@ -275,7 +300,7 @@ func (iface *browserSupportInterface) StaticInfo() interfaces.StaticInfo {
 	}
 }
 
-func (iface *browserSupportInterface) SanitizePlug(plug *interfaces.Plug) error {
+func (iface *browserSupportInterface) BeforePreparePlug(plug *snap.PlugInfo) error {
 	// It's fine if allow-sandbox isn't specified, but it it is,
 	// it needs to be bool
 	if v, ok := plug.Attrs["allow-sandbox"]; ok {
@@ -287,8 +312,9 @@ func (iface *browserSupportInterface) SanitizePlug(plug *interfaces.Plug) error 
 	return nil
 }
 
-func (iface *browserSupportInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
-	allowSandbox, _ := plug.Attrs["allow-sandbox"].(bool)
+func (iface *browserSupportInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
+	var allowSandbox bool
+	_ = plug.Attr("allow-sandbox", &allowSandbox)
 	spec.AddSnippet(browserSupportConnectedPlugAppArmor)
 	if allowSandbox {
 		spec.AddSnippet(browserSupportConnectedPlugAppArmorWithSandbox)
@@ -298,8 +324,9 @@ func (iface *browserSupportInterface) AppArmorConnectedPlug(spec *apparmor.Speci
 	return nil
 }
 
-func (iface *browserSupportInterface) SecCompConnectedPlug(spec *seccomp.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
-	allowSandbox, _ := plug.Attrs["allow-sandbox"].(bool)
+func (iface *browserSupportInterface) SecCompConnectedPlug(spec *seccomp.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
+	var allowSandbox bool
+	_ = plug.Attr("allow-sandbox", &allowSandbox)
 	snippet := browserSupportConnectedPlugSecComp
 	if allowSandbox {
 		snippet += browserSupportConnectedPlugSecCompWithSandbox

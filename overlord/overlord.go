@@ -43,7 +43,7 @@ import (
 	"github.com/snapcore/snapd/overlord/patch"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
-	"github.com/snapcore/snapd/overlord/storestate"
+	"github.com/snapcore/snapd/store"
 )
 
 var (
@@ -53,6 +53,10 @@ var (
 	abortWait      = 24 * time.Hour * 7
 
 	pruneMaxChanges = 500
+
+	defaultCachedDownloads = 5
+
+	configstateInit = configstate.Init
 )
 
 // Overlord is the central manager of a snappy system, keeping
@@ -68,17 +72,17 @@ type Overlord struct {
 	// restarts
 	restartHandler func(t state.RestartType)
 	// managers
-	inited    bool
-	snapMgr   *snapstate.SnapManager
-	assertMgr *assertstate.AssertManager
-	ifaceMgr  *ifacestate.InterfaceManager
-	hookMgr   *hookstate.HookManager
-	configMgr *configstate.ConfigManager
-	deviceMgr *devicestate.DeviceManager
-	cmdMgr    *cmdstate.CommandManager
+	inited     bool
+	snapMgr    *snapstate.SnapManager
+	assertMgr  *assertstate.AssertManager
+	ifaceMgr   *ifacestate.InterfaceManager
+	hookMgr    *hookstate.HookManager
+	deviceMgr  *devicestate.DeviceManager
+	cmdMgr     *cmdstate.CommandManager
+	unknownMgr *UnknownTaskManager
 }
 
-var setupStore = storestate.SetupStore
+var storeNew = store.New
 
 // New creates a new Overlord with all its state managers.
 func New() (*Overlord, error) {
@@ -98,6 +102,8 @@ func New() (*Overlord, error) {
 	}
 
 	o.stateEng = NewStateEngine(s)
+	o.unknownMgr = NewUnknownTaskManager(s)
+	o.stateEng.AddManager(o.unknownMgr)
 
 	hookMgr, err := hookstate.Manager(s)
 	if err != nil {
@@ -123,13 +129,6 @@ func New() (*Overlord, error) {
 	}
 	o.addManager(ifaceMgr)
 
-	// TODO: this is a bit weird, not actually a StateManager
-	configMgr, err := configstate.Manager(s, hookMgr)
-	if err != nil {
-		return nil, err
-	}
-	o.configMgr = configMgr
-
 	deviceMgr, err := devicestate.Manager(s, hookMgr)
 	if err != nil {
 		return nil, err
@@ -138,17 +137,18 @@ func New() (*Overlord, error) {
 
 	o.addManager(cmdstate.Manager(s))
 
+	configstateInit(hookMgr)
+
 	s.Lock()
 	defer s.Unlock()
-
 	// setting up the store
 	authContext := auth.NewAuthContext(s, o.deviceMgr)
-	err = setupStore(s, authContext)
-	if err != nil {
-		return nil, err
-	}
+	sto := storeNew(nil, authContext)
+	sto.SetCacheDownloads(defaultCachedDownloads)
 
-	if err := o.snapMgr.GenerateCookies(s); err != nil {
+	snapstate.ReplaceStore(s, sto)
+
+	if err := o.snapMgr.SyncCookies(s); err != nil {
 		return nil, fmt.Errorf("failed to generate cookies: %q", err)
 	}
 
@@ -171,6 +171,7 @@ func (o *Overlord) addManager(mgr StateManager) {
 		o.cmdMgr = x
 	}
 	o.stateEng.AddManager(mgr)
+	o.unknownMgr.Ignore(mgr.KnownTaskKinds())
 }
 
 func loadState(backend state.Backend) (*state.State, error) {
@@ -368,20 +369,28 @@ func (o *Overlord) InterfaceManager() *ifacestate.InterfaceManager {
 	return o.ifaceMgr
 }
 
-// HookManager returns the hook manager responsible for running hooks under the
-// overlord.
+// HookManager returns the hook manager responsible for running hooks
+// under the overlord.
 func (o *Overlord) HookManager() *hookstate.HookManager {
 	return o.hookMgr
 }
 
-// DeviceManager returns the device manager responsible for the device identity and policies
+// DeviceManager returns the device manager responsible for the device
+// identity and policies.
 func (o *Overlord) DeviceManager() *devicestate.DeviceManager {
 	return o.deviceMgr
 }
 
-// CommandManager returns the manager responsible for running odd jobs
+// CommandManager returns the manager responsible for running odd
+// jobs.
 func (o *Overlord) CommandManager() *cmdstate.CommandManager {
 	return o.cmdMgr
+}
+
+// UnknownTaskManager returns the manager responsible for handling of
+// unknown tasks.
+func (o *Overlord) UnknownTaskManager() *UnknownTaskManager {
+	return o.unknownMgr
 }
 
 // Mock creates an Overlord without any managers and with a backend
@@ -392,6 +401,9 @@ func Mock() *Overlord {
 		inited:   false,
 	}
 	o.stateEng = NewStateEngine(state.New(mockBackend{o: o}))
+	o.unknownMgr = NewUnknownTaskManager(o.stateEng.State())
+	o.stateEng.AddManager(o.unknownMgr)
+
 	return o
 }
 

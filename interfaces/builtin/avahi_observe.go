@@ -26,6 +26,7 @@ import (
 	"github.com/snapcore/snapd/interfaces/apparmor"
 	"github.com/snapcore/snapd/interfaces/dbus"
 	"github.com/snapcore/snapd/release"
+	"github.com/snapcore/snapd/snap"
 )
 
 const avahiObserveSummary = `allows discovery on a local network via the mDNS/DNS-SD protocol suite`
@@ -115,7 +116,7 @@ dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.Server
     member=StateChanged
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # address resolving
 dbus (receive)
@@ -139,7 +140,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.HostNameResolver
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # service resolving
 dbus (receive)
@@ -151,7 +152,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.ServiceResolver
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # domain browsing
 dbus (receive)
@@ -163,7 +164,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.DomainBrowser
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # record browsing
 dbus (receive)
@@ -175,7 +176,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.RecordBrowser
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # service browsing
 dbus (receive)
@@ -187,7 +188,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.ServiceBrowser
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 
 # service type browsing
 dbus (receive)
@@ -199,7 +200,7 @@ dbus (receive)
 dbus (send)
     bus=system
     interface=org.freedesktop.Avahi.ServiceTypeBrowser
-    peer=(name=org.freedesktop.Avahi, label=###PLUG_SECURITY_TAGS###),
+    peer=(label=###PLUG_SECURITY_TAGS###),
 `
 
 // Note: avahiObservePermanentSlotDBus is used by avahi-control in DBusPermanentSlot
@@ -420,7 +421,7 @@ func (iface *avahiObserveInterface) StaticInfo() interfaces.StaticInfo {
 	}
 }
 
-func (iface *avahiObserveInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *avahiObserveInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	old := "###SLOT_SECURITY_TAGS###"
 	var new string
 	if release.OnClassic {
@@ -435,14 +436,14 @@ func (iface *avahiObserveInterface) AppArmorConnectedPlug(spec *apparmor.Specifi
 	return nil
 }
 
-func (iface *avahiObserveInterface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *interfaces.Slot) error {
+func (iface *avahiObserveInterface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *snap.SlotInfo) error {
 	if !release.OnClassic {
 		spec.AddSnippet(avahiObservePermanentSlotAppArmor)
 	}
 	return nil
 }
 
-func (iface *avahiObserveInterface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *avahiObserveInterface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	if !release.OnClassic {
 		old := "###PLUG_SECURITY_TAGS###"
 		new := plugAppLabelExpr(plug)
@@ -452,7 +453,7 @@ func (iface *avahiObserveInterface) AppArmorConnectedSlot(spec *apparmor.Specifi
 	return nil
 }
 
-func (iface *avahiObserveInterface) DBusPermanentSlot(spec *dbus.Specification, slot *interfaces.Slot) error {
+func (iface *avahiObserveInterface) DBusPermanentSlot(spec *dbus.Specification, slot *snap.SlotInfo) error {
 	if !release.OnClassic {
 		spec.AddSnippet(avahiObservePermanentSlotDBus)
 	}

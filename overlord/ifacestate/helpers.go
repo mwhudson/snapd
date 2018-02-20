@@ -51,7 +51,7 @@ func (m *InterfaceManager) initialize(extraInterfaces []interfaces.Interface, ex
 	if err := m.renameCorePlugConnection(); err != nil {
 		return err
 	}
-	if err := m.reloadConnections(""); err != nil {
+	if _, err := m.reloadConnections(""); err != nil {
 		return err
 	}
 	if err := m.regenerateAllSecurityProfiles(); err != nil {
@@ -76,11 +76,17 @@ func (m *InterfaceManager) addInterfaces(extra []interfaces.Interface) error {
 
 func (m *InterfaceManager) addBackends(extra []interfaces.SecurityBackend) error {
 	for _, backend := range backends.All {
+		if err := backend.Initialize(); err != nil {
+			return err
+		}
 		if err := m.repo.AddBackend(backend); err != nil {
 			return err
 		}
 	}
 	for _, backend := range extra {
+		if err := backend.Initialize(); err != nil {
+			return err
+		}
 		if err := m.repo.AddBackend(backend); err != nil {
 			return err
 		}
@@ -185,15 +191,18 @@ func (m *InterfaceManager) renameCorePlugConnection() error {
 // reloadConnections reloads connections stored in the state in the repository.
 // Using non-empty snapName the operation can be scoped to connections
 // affecting a given snap.
-func (m *InterfaceManager) reloadConnections(snapName string) error {
+//
+// The return value is the list of affected snap names.
+func (m *InterfaceManager) reloadConnections(snapName string) ([]string, error) {
 	conns, err := getConns(m.state)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	affected := make(map[string]bool)
 	for id := range conns {
 		connRef, err := interfaces.ParseConnRef(id)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if snapName != "" && connRef.PlugRef.Snap != snapName && connRef.SlotRef.Snap != snapName {
 			continue
@@ -201,8 +210,14 @@ func (m *InterfaceManager) reloadConnections(snapName string) error {
 		if err := m.repo.Connect(connRef); err != nil {
 			logger.Noticef("%s", err)
 		}
+		affected[connRef.PlugRef.Snap] = true
+		affected[connRef.SlotRef.Snap] = true
 	}
-	return nil
+	result := make([]string, 0, len(affected))
+	for name := range affected {
+		result = append(result, name)
+	}
+	return result, nil
 }
 
 func (m *InterfaceManager) setupSnapSecurity(task *state.Task, snapInfo *snap.Info, opts interfaces.ConfinementOptions) error {
@@ -347,20 +362,20 @@ func (m *InterfaceManager) autoConnect(task *state.Task, snapName string, blackl
 		if len(candidates) != 1 {
 			crefs := make([]string, 0, len(candidates))
 			for _, candidate := range candidates {
-				crefs = append(crefs, candidate.Ref().String())
+				crefs = append(crefs, candidate.String())
 			}
-			task.Logf("cannot auto connect %s (plug auto-connection), candidates found: %q", plug.Ref(), strings.Join(crefs, ", "))
+			task.Logf("cannot auto connect %s (plug auto-connection), candidates found: %q", plug, strings.Join(crefs, ", "))
 			continue
 		}
 		slot := candidates[0]
-		connRef := interfaces.ConnRef{PlugRef: plug.Ref(), SlotRef: slot.Ref()}
+		connRef := interfaces.NewConnRef(plug, slot)
 		key := connRef.ID()
 		if _, ok := conns[key]; ok {
 			// Suggested connection already exist so don't clobber it.
 			// NOTE: we don't log anything here as this is a normal and common condition.
 			continue
 		}
-		if err := m.repo.Connect(connRef); err != nil {
+		if err := m.repo.Connect(*connRef); err != nil {
 			task.Logf("cannot auto connect %s to %s: %s (plug auto-connection)", connRef.PlugRef, connRef.SlotRef, err)
 			continue
 		}
@@ -384,23 +399,23 @@ func (m *InterfaceManager) autoConnect(task *state.Task, snapName string, blackl
 			// considering auto-connections from plug
 			candSlots := m.repo.AutoConnectCandidateSlots(plug.Snap.Name(), plug.Name, autochecker.check)
 
-			if len(candSlots) != 1 || candSlots[0].Ref() != slot.Ref() {
+			if len(candSlots) != 1 || candSlots[0].String() != slot.String() {
 				crefs := make([]string, 0, len(candSlots))
 				for _, candidate := range candSlots {
-					crefs = append(crefs, candidate.Ref().String())
+					crefs = append(crefs, candidate.String())
 				}
-				task.Logf("cannot auto connect %s to %s (slot auto-connection), alternatives found: %q", slot.Ref(), plug.Ref(), strings.Join(crefs, ", "))
+				task.Logf("cannot auto connect %s to %s (slot auto-connection), alternatives found: %q", slot, plug, strings.Join(crefs, ", "))
 				continue
 			}
 
-			connRef := interfaces.ConnRef{PlugRef: plug.Ref(), SlotRef: slot.Ref()}
+			connRef := interfaces.NewConnRef(plug, slot)
 			key := connRef.ID()
 			if _, ok := conns[key]; ok {
 				// Suggested connection already exist so don't clobber it.
 				// NOTE: we don't log anything here as this is a normal and common condition.
 				continue
 			}
-			if err := m.repo.Connect(connRef); err != nil {
+			if err := m.repo.Connect(*connRef); err != nil {
 				task.Logf("cannot auto connect %s to %s: %s (slot auto-connection)", connRef.PlugRef, connRef.SlotRef, err)
 				continue
 			}

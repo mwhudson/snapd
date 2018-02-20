@@ -73,7 +73,11 @@ func (s *ErrtrackerTestSuite) SetUpTest(c *C) {
 	s.AddCleanup(errtracker.MockMachineIDPaths([]string{p}))
 	s.AddCleanup(errtracker.MockHostSnapd(truePath))
 	s.AddCleanup(errtracker.MockCoreSnapd(falsePath))
-	s.AddCleanup(errtracker.MockReExec(true))
+	s.AddCleanup(errtracker.MockReExec(func() string {
+		return "yes"
+	}))
+	mockDetectVirt := testutil.MockCommand(c, "systemd-detect-virt", "echo none")
+	s.AddCleanup(mockDetectVirt.Restore)
 
 	s.hostBuildID, err = osutil.ReadBuildID(truePath)
 	c.Assert(err, IsNil)
@@ -131,9 +135,10 @@ func (s *ErrtrackerTestSuite) TestReport(c *C) {
 				"Architecture":       arch.UbuntuArchitecture(),
 				"DidSnapdReExec":     "yes",
 
-				"ProblemType": "Snap",
-				"Snap":        "some-snap",
-				"Channel":     "beta",
+				"ProblemType":  "Snap",
+				"Snap":         "some-snap",
+				"Channel":      "beta",
+				"DetectedVirt": "none",
 
 				"MD5SumSnapConfineAppArmorProfile":            "7a7aa5f21063170c1991b84eb8d86de1",
 				"MD5SumSnapConfineAppArmorProfileDpkgNew":     "93b885adfe0da089cdf634904fd59f71",
@@ -262,6 +267,7 @@ func (s *ErrtrackerTestSuite) TestReportRepair(c *C) {
 				"ErrorMessage":       "failure in script",
 				"DuplicateSignature": "[dupSig]",
 				"BrandID":            "canonical",
+				"DetectedVirt":       "none",
 			})
 			fmt.Fprintf(w, "c14388aa-f78d-11e6-8df0-fa163eaf9b83 OOPSID")
 		default:

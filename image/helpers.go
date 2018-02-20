@@ -22,22 +22,28 @@ package image
 // TODO: put these in appropriate package(s) once they are clarified a bit more
 
 import (
+	"bytes"
+	"crypto"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/mvo5/goconfigparser"
+	"golang.org/x/net/context"
+
 	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/asserts/snapasserts"
+	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/overlord/auth"
 	"github.com/snapcore/snapd/progress"
 	"github.com/snapcore/snapd/release"
 	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/store"
-
-	"golang.org/x/net/context"
 )
 
 // A Store can find metadata on snaps, download snaps and fetch assertions.
@@ -79,23 +85,72 @@ type authData struct {
 }
 
 func readAuthFile(authFn string) (*auth.UserState, error) {
-	f, err := os.Open(authFn)
+	data, err := ioutil.ReadFile(authFn)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open auth file %q: %v", authFn, err)
+		return nil, fmt.Errorf("cannot read auth file %q: %v", authFn, err)
 	}
-	defer f.Close()
 
+	creds, err := parseAuthFile(authFn, data)
+	if err != nil {
+		// try snapcraft login format instead
+		var err2 error
+		creds, err2 = parseSnapcraftLoginFile(authFn, data)
+		if err2 != nil {
+			trimmed := bytes.TrimSpace(data)
+			if len(trimmed) > 0 && trimmed[0] == '[' {
+				return nil, err2
+			}
+			return nil, err
+		}
+	}
+
+	return &auth.UserState{
+		StoreMacaroon:   creds.Macaroon,
+		StoreDischarges: creds.Discharges,
+	}, nil
+}
+
+func parseAuthFile(authFn string, data []byte) (*authData, error) {
 	var creds authData
-	dec := json.NewDecoder(f)
-	if err := dec.Decode(&creds); err != nil {
+	err := json.Unmarshal(data, &creds)
+	if err != nil {
 		return nil, fmt.Errorf("cannot decode auth file %q: %v", authFn, err)
 	}
 	if creds.Macaroon == "" || len(creds.Discharges) == 0 {
 		return nil, fmt.Errorf("invalid auth file %q: missing fields", authFn)
 	}
-	return &auth.UserState{
-		StoreMacaroon:   creds.Macaroon,
-		StoreDischarges: creds.Discharges,
+	return &creds, nil
+}
+
+func snapcraftLoginSection() string {
+	if osutil.GetenvBool("SNAPPY_USE_STAGING_STORE") {
+		return "login.staging.ubuntu.com"
+	}
+	return "login.ubuntu.com"
+}
+
+func parseSnapcraftLoginFile(authFn string, data []byte) (*authData, error) {
+	errPrefix := fmt.Sprintf("invalid snapcraft login file %q", authFn)
+
+	cfg := goconfigparser.New()
+	if err := cfg.ReadString(string(data)); err != nil {
+		return nil, fmt.Errorf("%s: %v", errPrefix, err)
+	}
+	sec := snapcraftLoginSection()
+	macaroon, err := cfg.Get(sec, "macaroon")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s", errPrefix, err)
+	}
+	unboundDischarge, err := cfg.Get(sec, "unbound_discharge")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", errPrefix, err)
+	}
+	if macaroon == "" || unboundDischarge == "" {
+		return nil, fmt.Errorf("invalid snapcraft login file %q: empty fields", authFn)
+	}
+	return &authData{
+		Macaroon:   macaroon,
+		Discharges: []string{unboundDischarge},
 	}, nil
 }
 
@@ -143,6 +198,15 @@ func (tsto *ToolingStore) DownloadSnap(name string, revision snap.Revision, opts
 
 	baseName := filepath.Base(snap.MountFile())
 	targetFn = filepath.Join(targetDir, baseName)
+
+	// check if we already have the right file
+	if osutil.FileExists(targetFn) {
+		sha3_384Dgst, size, err := osutil.FileDigest(targetFn, crypto.SHA3_384)
+		if err == nil && size == uint64(snap.DownloadInfo.Size) && fmt.Sprintf("%x", sha3_384Dgst) == snap.DownloadInfo.Sha3_384 {
+			logger.Debugf("not downloading, using existing file %s", targetFn)
+			return targetFn, snap, nil
+		}
+	}
 
 	pb := progress.MakeProgressBar()
 	defer pb.Finished()

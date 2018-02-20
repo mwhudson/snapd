@@ -357,6 +357,10 @@ func (e *ensureError) Error() string {
 	return strings.Join(parts, "\n - ")
 }
 
+func (m *DeviceManager) KnownTaskKinds() []string {
+	return m.runner.KnownTaskKinds()
+}
+
 // Ensure implements StateManager.Ensure.
 func (m *DeviceManager) Ensure() error {
 	var errs []error
@@ -465,4 +469,12 @@ func (m *DeviceManager) DeviceSessionRequestParams(nonce string) (*auth.DeviceSe
 		Model:   model,
 	}, err
 
+}
+
+// ProxyStore returns the store assertion for the proxy store if one is set.
+func (m *DeviceManager) ProxyStore() (*asserts.Store, error) {
+	m.state.Lock()
+	defer m.state.Unlock()
+
+	return ProxyStore(m.state)
 }

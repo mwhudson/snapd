@@ -27,6 +27,7 @@ import (
 	"io/ioutil"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/user"
@@ -59,7 +60,6 @@ import (
 	"github.com/snapcore/snapd/overlord/servicestate"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
-	"github.com/snapcore/snapd/overlord/storestate"
 	"github.com/snapcore/snapd/progress"
 	"github.com/snapcore/snapd/release"
 	"github.com/snapcore/snapd/snap"
@@ -168,10 +168,11 @@ var (
 	}
 
 	interfacesCmd = &Command{
-		Path:   "/v2/interfaces",
-		UserOK: true,
-		GET:    interfacesConnectionsMultiplexer,
-		POST:   changeInterfaces,
+		Path:     "/v2/interfaces",
+		UserOK:   true,
+		PolkitOK: "io.snapcraft.snapd.manage-interfaces",
+		GET:      interfacesConnectionsMultiplexer,
+		POST:     changeInterfaces,
 	}
 
 	// TODO: allow to post assertions for UserOK? they are verified anyway
@@ -266,13 +267,26 @@ func sysInfo(c *Command, r *http.Request, user *auth.UserState) Response {
 	st := c.d.overlord.State()
 	snapMgr := c.d.overlord.SnapManager()
 	st.Lock()
+	defer st.Unlock()
 	nextRefresh := snapMgr.NextRefresh()
 	lastRefresh, _ := snapMgr.LastRefresh()
-	refreshScheduleStr := snapMgr.RefreshSchedule()
+	refreshScheduleStr, legacySchedule, err := snapMgr.RefreshSchedule()
+	if err != nil {
+		return InternalError("cannot get refresh schedule: %s", err)
+	}
 	users, err := auth.Users(st)
-	st.Unlock()
 	if err != nil && err != state.ErrNoState {
 		return InternalError("cannot get user auth data: %s", err)
+	}
+
+	refreshInfo := client.RefreshInfo{
+		Last: formatRefreshTime(lastRefresh),
+		Next: formatRefreshTime(nextRefresh),
+	}
+	if !legacySchedule {
+		refreshInfo.Timer = refreshScheduleStr
+	} else {
+		refreshInfo.Schedule = refreshScheduleStr
 	}
 
 	m := map[string]interface{}{
@@ -286,11 +300,7 @@ func sysInfo(c *Command, r *http.Request, user *auth.UserState) Response {
 			"snap-mount-dir": dirs.SnapMountDir,
 			"snap-bin-dir":   dirs.SnapBinariesDir,
 		},
-		"refresh": client.RefreshInfo{
-			Schedule: refreshScheduleStr,
-			Last:     formatRefreshTime(lastRefresh),
-			Next:     formatRefreshTime(nextRefresh),
-		},
+		"refresh": refreshInfo,
 	}
 	// NOTE: Right now we don't have a good way to differentiate if we
 	// only have partial confinement (ala AppArmor disabled and Seccomp
@@ -409,6 +419,8 @@ func loginUser(c *Command, r *http.Request, user *auth.UserState) Response {
 		// local user logged-in, set its store macaroons
 		user.StoreMacaroon = macaroon
 		user.StoreDischarges = []string{discharge}
+		// user's email address authenticated by the store
+		user.Email = loginData.Email
 		err = auth.UpdateUser(state, user)
 	} else {
 		user, err = auth.NewUser(state, loginData.Username, loginData.Email, macaroon, []string{discharge})
@@ -524,12 +536,12 @@ func webify(result *client.Snap, resource string) *client.Snap {
 	return result
 }
 
-func getStore(c *Command) storestate.StoreService {
+func getStore(c *Command) snapstate.StoreService {
 	st := c.d.overlord.State()
 	st.Lock()
 	defer st.Unlock()
 
-	return storestate.Store(st)
+	return snapstate.Store(st)
 }
 
 func getSections(c *Command, r *http.Request, user *auth.UserState) Response {
@@ -544,8 +556,12 @@ func getSections(c *Command, r *http.Request, user *auth.UserState) Response {
 	switch err {
 	case nil:
 		// pass
-	case store.ErrEmptyQuery, store.ErrBadQuery:
-		return BadRequest("%v", err)
+	case store.ErrBadQuery:
+		return SyncResponse(&resp{
+			Type:   ResponseTypeError,
+			Result: &errorResult{Message: err.Error(), Kind: errorKindBadQuery},
+			Status: 400,
+		}, nil)
 	case store.ErrUnauthenticated, store.ErrInvalidCredentials:
 		return Unauthorized("%v", err)
 	default:
@@ -605,11 +621,23 @@ func searchStore(c *Command, r *http.Request, user *auth.UserState) Response {
 	switch err {
 	case nil:
 		// pass
-	case store.ErrEmptyQuery, store.ErrBadQuery:
-		return BadRequest("%v", err)
+	case store.ErrBadQuery:
+		return SyncResponse(&resp{
+			Type:   ResponseTypeError,
+			Result: &errorResult{Message: err.Error(), Kind: errorKindBadQuery},
+			Status: 400,
+		}, nil)
 	case store.ErrUnauthenticated, store.ErrInvalidCredentials:
 		return Unauthorized(err.Error())
 	default:
+		if e, ok := err.(net.Error); ok && e.Timeout() {
+			return SyncResponse(&resp{
+				Type:   ResponseTypeError,
+				Result: &errorResult{Message: err.Error(), Kind: errorKindNetworkTimeout},
+				Status: 400,
+			}, nil)
+		}
+
 		return InternalError("%v", err)
 	}
 
@@ -803,6 +831,7 @@ func (*licenseData) Error() string {
 type snapInstruction struct {
 	progress.NullMeter
 	Action           string        `json:"action"`
+	Amend            bool          `json:"amend"`
 	Channel          string        `json:"channel"`
 	Revision         snap.Revision `json:"revision"`
 	DevMode          bool          `json:"devmode"`
@@ -977,6 +1006,9 @@ func snapUpdate(inst *snapInstruction, st *state.State) (string, []*state.TaskSe
 	if inst.IgnoreValidation {
 		flags.IgnoreValidation = true
 	}
+	if inst.Amend {
+		flags.Amend = true
+	}
 
 	// we need refreshed snap-declarations to enforce refresh-control as best as we can
 	if err = assertstateRefreshSnapDeclarations(st, inst.userID); err != nil {
@@ -1107,34 +1139,63 @@ func (inst *snapInstruction) dispatch() snapActionFunc {
 
 func (inst *snapInstruction) errToResponse(err error) Response {
 	var kind errorKind
+	var snapName string
 
 	switch err {
 	case store.ErrSnapNotFound:
-		return SnapNotFound(inst.Snaps[0], err)
+		switch len(inst.Snaps) {
+		case 1:
+			return SnapNotFound(inst.Snaps[0], err)
+		// store.ErrSnapNotFound should only be returned for individual
+		// snap queries; in all other cases something's wrong
+		case 0:
+			return InternalError("store.SnapNotFound with no snap given")
+		default:
+			return InternalError("store.SnapNotFound with %d snaps", len(inst.Snaps))
+		}
 	case store.ErrNoUpdateAvailable:
 		kind = errorKindSnapNoUpdateAvailable
 	case store.ErrLocalSnap:
 		kind = errorKindSnapLocal
 	default:
+		handled := true
 		switch err := err.(type) {
 		case *snap.AlreadyInstalledError:
 			kind = errorKindSnapAlreadyInstalled
+			snapName = err.Snap
 		case *snap.NotInstalledError:
 			kind = errorKindSnapNotInstalled
+			snapName = err.Snap
 		case *snapstate.SnapNeedsDevModeError:
 			kind = errorKindSnapNeedsDevMode
+			snapName = err.Snap
 		case *snapstate.SnapNeedsClassicError:
 			kind = errorKindSnapNeedsClassic
+			snapName = err.Snap
 		case *snapstate.SnapNeedsClassicSystemError:
 			kind = errorKindSnapNeedsClassicSystem
+			snapName = err.Snap
+		case net.Error:
+			if err.Timeout() {
+				kind = errorKindNetworkTimeout
+			} else {
+				handled = false
+			}
 		default:
-			return BadRequest("cannot %s %q: %v", inst.Action, inst.Snaps[0], err)
+			handled = false
+		}
+
+		if !handled {
+			if len(inst.Snaps) == 0 {
+				return BadRequest("cannot %s: %v", inst.Action, err)
+			}
+			return BadRequest("cannot %s %s: %v", inst.Action, strutil.Quoted(inst.Snaps), err)
 		}
 	}
 
 	return SyncResponse(&resp{
 		Type:   ResponseTypeError,
-		Result: &errorResult{Message: err.Error(), Kind: kind},
+		Result: &errorResult{Message: err.Error(), Kind: kind, Value: snapName},
 		Status: 400,
 	}, nil)
 }
@@ -1290,7 +1351,7 @@ func snapsOp(c *Command, r *http.Request, user *auth.UserState) Response {
 		return BadRequest("unsupported multi-snap operation %q", inst.Action)
 	}
 	if err != nil {
-		return InternalError("cannot %s %q: %v", inst.Action, inst.Snaps, err)
+		return inst.errToResponse(err)
 	}
 
 	var chg *state.Change
@@ -1563,16 +1624,13 @@ func setSnapConf(c *Command, r *http.Request, user *auth.UserState) Response {
 	st.Lock()
 	defer st.Unlock()
 
-	var snapst snapstate.SnapState
-	if err := snapstate.Get(st, snapName, &snapst); err != nil {
-		if err == state.ErrNoState {
+	taskset, err := configstate.ConfigureInstalled(st, snapName, patchValues, 0)
+	if err != nil {
+		if _, ok := err.(*snap.NotInstalledError); ok {
 			return SnapNotFound(snapName, err)
-		} else {
-			return InternalError("%v", err)
 		}
+		return InternalError("%v", err)
 	}
-
-	taskset := configstate.Configure(st, snapName, patchValues, 0)
 
 	summary := fmt.Sprintf("Change configuration of %q snap", snapName)
 	change := newChange(st, "configure-snap", summary, []*state.TaskSet{taskset}, []string{snapName})
@@ -1618,7 +1676,55 @@ func getInterfaces(c *Command, r *http.Request, user *auth.UserState) Response {
 
 func getLegacyConnections(c *Command, r *http.Request, user *auth.UserState) Response {
 	repo := c.d.overlord.InterfaceManager().Repository()
-	return SyncResponse(repo.Interfaces(), nil)
+	ifaces := repo.Interfaces()
+
+	var ifjson interfacesJSON
+
+	plugConns := map[string][]interfaces.SlotRef{}
+	slotConns := map[string][]interfaces.PlugRef{}
+
+	for _, conn := range ifaces.Connections {
+		plugRef := conn.PlugRef.String()
+		slotRef := conn.SlotRef.String()
+		plugConns[plugRef] = append(plugConns[plugRef], conn.SlotRef)
+		slotConns[slotRef] = append(slotConns[slotRef], conn.PlugRef)
+	}
+
+	for _, plug := range ifaces.Plugs {
+		var apps []string
+		for _, app := range plug.Apps {
+			apps = append(apps, app.Name)
+		}
+		pj := plugJSON{
+			Snap:        plug.Snap.Name(),
+			Name:        plug.Name,
+			Interface:   plug.Interface,
+			Attrs:       plug.Attrs,
+			Apps:        apps,
+			Label:       plug.Label,
+			Connections: plugConns[plug.String()],
+		}
+		ifjson.Plugs = append(ifjson.Plugs, pj)
+	}
+	for _, slot := range ifaces.Slots {
+		var apps []string
+		for _, app := range slot.Apps {
+			apps = append(apps, app.Name)
+		}
+
+		sj := slotJSON{
+			Snap:        slot.Snap.Name(),
+			Name:        slot.Name,
+			Interface:   slot.Interface,
+			Attrs:       slot.Attrs,
+			Apps:        apps,
+			Label:       slot.Label,
+			Connections: slotConns[slot.String()],
+		}
+		ifjson.Slots = append(ifjson.Slots, sj)
+	}
+
+	return SyncResponse(ifjson, nil)
 }
 
 // plugJSON aids in marshaling Plug into JSON.
@@ -1641,6 +1747,12 @@ type slotJSON struct {
 	Apps        []string               `json:"apps,omitempty"`
 	Label       string                 `json:"label"`
 	Connections []interfaces.PlugRef   `json:"connections,omitempty"`
+}
+
+// interfacesJSON aids in marshaling plugs, slots and their connections into JSON.
+type interfacesJSON struct {
+	Plugs []plugJSON `json:"plugs,omitempty"`
+	Slots []slotJSON `json:"slots,omitempty"`
 }
 
 // interfaceAction is an action performed on the interface system.
@@ -1986,6 +2098,8 @@ func abortChange(c *Command, r *http.Request, user *auth.UserState) Response {
 
 var (
 	postCreateUserUcrednetGet = ucrednetGet
+	runSnapctlUcrednetGet     = ucrednetGet
+	ctlcmdRun                 = ctlcmd.Run
 	storeUserInfo             = store.UserInfo
 	osutilAddUser             = osutil.AddUser
 )
@@ -2126,13 +2240,9 @@ func setupLocalUser(st *state.State, username, email string) error {
 	if err != nil {
 		return fmt.Errorf("cannot lookup user %q: %s", username, err)
 	}
-	uid, err := strconv.Atoi(user.Uid)
+	uid, gid, err := osutil.UidGid(user)
 	if err != nil {
-		return fmt.Errorf("cannot get uid of user %q: %s", username, err)
-	}
-	gid, err := strconv.Atoi(user.Gid)
-	if err != nil {
-		return fmt.Errorf("cannot get gid of user %q: %s", username, err)
+		return err
 	}
 	authDataFn := filepath.Join(user.HomeDir, ".snap", "auth.json")
 	if err := osutil.MkdirAllChown(filepath.Dir(authDataFn), 0700, uid, gid); err != nil {
@@ -2146,10 +2256,17 @@ func setupLocalUser(st *state.State, username, email string) error {
 	if err != nil {
 		return fmt.Errorf("cannot persist authentication details: %v", err)
 	}
-	// store macaroon auth in auth.json in the new users home dir
+	// store macaroon auth, user's ID, email and username in auth.json in
+	// the new users home dir
 	outStr, err := json.Marshal(struct {
+		ID       int    `json:"id"`
+		Username string `json:"username"`
+		Email    string `json:"email"`
 		Macaroon string `json:"macaroon"`
 	}{
+		ID:       authUser.ID,
+		Username: authUser.Username,
+		Email:    authUser.Email,
 		Macaroon: authUser.Macaroon,
 	})
 	if err != nil {
@@ -2163,7 +2280,7 @@ func setupLocalUser(st *state.State, username, email string) error {
 }
 
 func postCreateUser(c *Command, r *http.Request, user *auth.UserState) Response {
-	_, uid, err := postCreateUserUcrednetGet(r.RemoteAddr)
+	_, uid, _, err := postCreateUserUcrednetGet(r.RemoteAddr)
 	if err != nil {
 		return BadRequest("cannot get ucrednet uid: %v", err)
 	}
@@ -2308,6 +2425,8 @@ func postDebug(c *Command, r *http.Request, user *auth.UserState) Response {
 		return SyncResponse(map[string]interface{}{
 			"base-declaration": string(asserts.Encode(bd)),
 		}, nil)
+	case "can-manage-refreshes":
+		return SyncResponse(devicestate.CanManageRefreshes(st), nil)
 	default:
 		return BadRequest("unknown debug action: %v", a.Action)
 	}
@@ -2353,10 +2472,19 @@ func runSnapctl(c *Command, r *http.Request, user *auth.UserState) Response {
 		return BadRequest("snapctl cannot run without args")
 	}
 
+	_, uid, _, err := runSnapctlUcrednetGet(r.RemoteAddr)
+	if err != nil {
+		return Forbidden("cannot get remote user: %s", err)
+	}
+	// we only allow "get" from regular users in snapctl
+	if uid != 0 && snapctlOptions.Args[0] != "get" {
+		return Forbidden("cannot use %q with uid %d, try with sudo", snapctlOptions.Args[0], uid)
+	}
+
 	// Ignore missing context error to allow 'snapctl -h' without a context;
 	// Actual context is validated later by get/set.
 	context, _ := c.d.overlord.HookManager().Context(snapctlOptions.ContextID)
-	stdout, stderr, err := ctlcmd.Run(context, snapctlOptions.Args)
+	stdout, stderr, err := ctlcmdRun(context, snapctlOptions.Args)
 	if err != nil {
 		if e, ok := err.(*flags.Error); ok && e.Type == flags.ErrHelp {
 			stdout = []byte(e.Error())
@@ -2382,7 +2510,7 @@ func runSnapctl(c *Command, r *http.Request, user *auth.UserState) Response {
 }
 
 func getUsers(c *Command, r *http.Request, user *auth.UserState) Response {
-	_, uid, err := postCreateUserUcrednetGet(r.RemoteAddr)
+	_, uid, _, err := postCreateUserUcrednetGet(r.RemoteAddr)
 	if err != nil {
 		return BadRequest("cannot get ucrednet uid: %v", err)
 	}
@@ -2482,10 +2610,7 @@ func changeAliases(c *Command, r *http.Request, user *auth.UserState) Response {
 		summary = fmt.Sprintf(i18n.G("Prefer aliases of snap %q"), a.Snap)
 	}
 
-	change := st.NewChange(a.Action, summary)
-	change.Set("snap-names", []string{a.Snap})
-	change.AddAll(taskset)
-
+	change := newChange(st, a.Action, summary, []*state.TaskSet{taskset}, []string{a.Snap})
 	st.EnsureBefore(0)
 
 	return AsyncResponse(nil, &Meta{Change: change.ID()})
@@ -2635,7 +2760,7 @@ func postApps(c *Command, r *http.Request, user *auth.UserState) Response {
 		return InternalError("no services found")
 	}
 
-	ts, err := servicestate.Control(st, appInfos, &inst)
+	ts, err := servicestate.Control(st, appInfos, &inst, nil)
 	if err != nil {
 		if _, ok := err.(servicestate.ServiceActionConflictError); ok {
 			return Conflict(err.Error())

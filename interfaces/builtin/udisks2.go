@@ -27,6 +27,7 @@ import (
 	"github.com/snapcore/snapd/interfaces/dbus"
 	"github.com/snapcore/snapd/interfaces/seccomp"
 	"github.com/snapcore/snapd/interfaces/udev"
+	"github.com/snapcore/snapd/snap"
 )
 
 const udisks2Summary = `allows operating as or interacting with the UDisks2 service`
@@ -130,6 +131,14 @@ dbus (receive, send)
     path=/org/freedesktop/UDisks2/**
     interface=org.freedesktop.UDisks2.*
     peer=(label=###PLUG_SECURITY_TAGS###),
+
+# Allow clients to introspect the service
+dbus (receive)
+    bus=system
+    path=/org/freedesktop/UDisks2
+    interface=org.freedesktop.DBus.Introspectable
+    member=Introspect
+    peer=(label=###PLUG_SECURITY_TAGS###),
 `
 
 const udisks2ConnectedPlugAppArmor = `
@@ -186,6 +195,10 @@ const udisks2PermanentSlotDBus = `
 <policy user="root">
     <allow own="org.freedesktop.UDisks2"/>
     <allow send_destination="org.freedesktop.UDisks2"/>
+</policy>
+
+<policy context="default">
+    <allow send_destination="org.freedesktop.UDisks2" send_interface="org.freedesktop.DBus.Introspectable" />
 </policy>
 `
 
@@ -366,17 +379,17 @@ func (iface *udisks2Interface) StaticInfo() interfaces.StaticInfo {
 	}
 }
 
-func (iface *udisks2Interface) DBusConnectedPlug(spec *dbus.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *udisks2Interface) DBusConnectedPlug(spec *dbus.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	spec.AddSnippet(udisks2ConnectedPlugDBus)
 	return nil
 }
 
-func (iface *udisks2Interface) DBusPermanentSlot(spec *dbus.Specification, slot *interfaces.Slot) error {
+func (iface *udisks2Interface) DBusPermanentSlot(spec *dbus.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(udisks2PermanentSlotDBus)
 	return nil
 }
 
-func (iface *udisks2Interface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *udisks2Interface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	old := "###SLOT_SECURITY_TAGS###"
 	new := slotAppLabelExpr(slot)
 	snippet := strings.Replace(udisks2ConnectedPlugAppArmor, old, new, -1)
@@ -384,12 +397,12 @@ func (iface *udisks2Interface) AppArmorConnectedPlug(spec *apparmor.Specificatio
 	return nil
 }
 
-func (iface *udisks2Interface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *interfaces.Slot) error {
+func (iface *udisks2Interface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(udisks2PermanentSlotAppArmor)
 	return nil
 }
 
-func (iface *udisks2Interface) UDevPermanentSlot(spec *udev.Specification, slot *interfaces.Slot) error {
+func (iface *udisks2Interface) UDevPermanentSlot(spec *udev.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(udisks2PermanentSlotUDev)
 	spec.TagDevice(`SUBSYSTEM=="block"`)
 	// # This tags all USB devices, so we'll use AppArmor to mediate specific access (eg, /dev/sd* and /dev/mmcblk*)
@@ -397,7 +410,7 @@ func (iface *udisks2Interface) UDevPermanentSlot(spec *udev.Specification, slot 
 	return nil
 }
 
-func (iface *udisks2Interface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *udisks2Interface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	old := "###PLUG_SECURITY_TAGS###"
 	new := plugAppLabelExpr(plug)
 	snippet := strings.Replace(udisks2ConnectedSlotAppArmor, old, new, -1)
@@ -405,7 +418,7 @@ func (iface *udisks2Interface) AppArmorConnectedSlot(spec *apparmor.Specificatio
 	return nil
 }
 
-func (iface *udisks2Interface) SecCompPermanentSlot(spec *seccomp.Specification, slot *interfaces.Slot) error {
+func (iface *udisks2Interface) SecCompPermanentSlot(spec *seccomp.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(udisks2PermanentSlotSecComp)
 	return nil
 }

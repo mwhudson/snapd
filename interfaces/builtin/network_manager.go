@@ -28,6 +28,7 @@ import (
 	"github.com/snapcore/snapd/interfaces/seccomp"
 	"github.com/snapcore/snapd/interfaces/udev"
 	"github.com/snapcore/snapd/release"
+	"github.com/snapcore/snapd/snap"
 )
 
 const networkManagerSummary = `allows operating as the NetworkManager service`
@@ -265,7 +266,6 @@ accept4
 bind
 listen
 sethostname
-shutdown
 # netlink
 socket AF_NETLINK - -
 `
@@ -428,7 +428,7 @@ func (iface *networkManagerInterface) StaticInfo() interfaces.StaticInfo {
 	}
 }
 
-func (iface *networkManagerInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *networkManagerInterface) AppArmorConnectedPlug(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	old := "###SLOT_SECURITY_TAGS###"
 	var new string
 	if release.OnClassic {
@@ -443,7 +443,7 @@ func (iface *networkManagerInterface) AppArmorConnectedPlug(spec *apparmor.Speci
 	return nil
 }
 
-func (iface *networkManagerInterface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *networkManagerInterface) AppArmorConnectedSlot(spec *apparmor.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	old := "###PLUG_SECURITY_TAGS###"
 	new := plugAppLabelExpr(plug)
 	snippet := strings.Replace(networkManagerConnectedSlotAppArmor, old, new, -1)
@@ -451,27 +451,27 @@ func (iface *networkManagerInterface) AppArmorConnectedSlot(spec *apparmor.Speci
 	return nil
 }
 
-func (iface *networkManagerInterface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *interfaces.Slot) error {
+func (iface *networkManagerInterface) AppArmorPermanentSlot(spec *apparmor.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(networkManagerPermanentSlotAppArmor)
 	return nil
 }
 
-func (iface *networkManagerInterface) DBusPermanentSlot(spec *dbus.Specification, slot *interfaces.Slot) error {
+func (iface *networkManagerInterface) DBusPermanentSlot(spec *dbus.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(networkManagerPermanentSlotDBus)
 	return nil
 }
 
-func (iface *networkManagerInterface) SecCompPermanentSlot(spec *seccomp.Specification, slot *interfaces.Slot) error {
+func (iface *networkManagerInterface) SecCompPermanentSlot(spec *seccomp.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(networkManagerPermanentSlotSecComp)
 	return nil
 }
 
-func (iface *networkManagerInterface) UDevPermanentSlot(spec *udev.Specification, slot *interfaces.Slot) error {
+func (iface *networkManagerInterface) UDevPermanentSlot(spec *udev.Specification, slot *snap.SlotInfo) error {
 	spec.TagDevice(`KERNEL=="rfkill"`)
 	return nil
 }
 
-func (iface *networkManagerInterface) SecCompConnectedPlug(spec *seccomp.Specification, plug *interfaces.Plug, plugAttrs map[string]interface{}, slot *interfaces.Slot, slotAttrs map[string]interface{}) error {
+func (iface *networkManagerInterface) SecCompConnectedPlug(spec *seccomp.Specification, plug *interfaces.ConnectedPlug, slot *interfaces.ConnectedSlot) error {
 	spec.AddSnippet(networkManagerConnectedPlugSecComp)
 	return nil
 }
