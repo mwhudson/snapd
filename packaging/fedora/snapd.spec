@@ -50,7 +50,7 @@
 %global provider_prefix %{provider}.%{provider_tld}/%{project}/%{repo}
 %global import_path     %{provider_prefix}
 
-%global snappy_svcs     snapd.service snapd.socket snapd.autoimport.service snapd.refresh.timer snapd.refresh.service
+%global snappy_svcs     snapd.service snapd.socket snapd.autoimport.service
 
 # Until we have a way to add more extldflags to gobuild macro...
 %if 0%{?fedora} >= 26
@@ -70,7 +70,7 @@
 %endif
 
 Name:           snapd
-Version:        2.31.1
+Version:        2.31.2
 Release:        0%{?dist}
 Summary:        A transactional software package manager
 Group:          System Environment/Base
@@ -601,9 +601,6 @@ popd
 %{_unitdir}/snapd.socket
 %{_unitdir}/snapd.service
 %{_unitdir}/snapd.autoimport.service
-%{_unitdir}/snapd.refresh.service
-%{_unitdir}/snapd.refresh.timer
-%{_unitdir}/var-lib-snapd-snap.mount
 %{_datadir}/dbus-1/services/io.snapcraft.Launcher.service
 %{_datadir}/polkit-1/actions/io.snapcraft.snapd.policy
 %config(noreplace) %{_sysconfdir}/sysconfig/snapd
@@ -641,6 +638,7 @@ popd
 %{_libexecdir}/snapd/snap-seccomp
 %{_libexecdir}/snapd/snap-update-ns
 %{_libexecdir}/snapd/system-shutdown
+%{_libexecdir}/snapd/snapd-generator
 %{_mandir}/man1/snap-confine.1*
 %{_mandir}/man5/snap-discard-ns.5*
 %{_prefix}/lib/udev/snappy-app-dev
@@ -676,9 +674,6 @@ if [ $1 -eq 1 ] ; then
    if systemctl -q is-enabled snapd.socket > /dev/null 2>&1 ; then
       systemctl start snapd.socket > /dev/null 2>&1 || :
    fi
-   if systemctl -q is-enabled snapd.refresh.timer > /dev/null 2>&1 ; then
-      systemctl start snapd.refresh.timer > /dev/null 2>&1 || :
-   fi
 fi
 
 %preun
@@ -711,6 +706,23 @@ fi
 
 
 %changelog
+* Fri Mar 09 2018 Michael Vogt <mvo@ubuntu.com>
+- New upstream release 2.31.2
+ - many: add the snapd-generator
+ - polkit: ensure error is properly set if dialog is dismissed
+ - xdgopenproxy: integrate xdg-open implementation into snapctl
+ - userd: add an OpenFile method for launching local files with xdg-
+   open
+ - configstate: when disable "ssh" we must disable the "sshd"
+   service
+ - many: remove snapd.refresh.{timer,service}
+ - interfaces/builtin: allow MM to access login1
+ - timeutil: account for 24h wrap when flattening clock spans
+ - interfaces/screen-inhibit-control,network-status: fix dbus path
+   and interface typos
+ - systemd, wrappers: start all snap services in one systemctl
+   call
+ - tests: disable interfaces-location-control on s390x
 * Tue Feb 20 2018 Michael Vogt <mvo@ubuntu.com>
 - New upstream release 2.31.1
  - tests: multiple autopkgtest related fixes for 18.04
