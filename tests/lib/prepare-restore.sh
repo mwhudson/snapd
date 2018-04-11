@@ -252,6 +252,8 @@ prepare_project() {
         go get -u github.com/kardianos/govendor
     fi
     quiet govendor sync
+    # govendor runs as root and will leave strange permissions
+    chown test.test -R "$SPREAD_PATH"
 
     if [ -z "$SNAPD_PUBLISHED_VERSION" ]; then
         case "$SPREAD_SYSTEM" in
@@ -317,6 +319,10 @@ prepare_project_each() {
             systemctl start systemd-journald.service
             ;;
         *)
+            # per journalctl's implementation, --rotate and --sync 'override'
+            # each other if used in a single command, with the one appearing
+            # later being effective
+            journalctl --sync
             journalctl --rotate
             sleep .1
             journalctl --vacuum-time=1ms
@@ -338,6 +344,19 @@ restore_project_each() {
     # pick up such errors.
     if grep "invalid .*snap.*.rules" /var/log/syslog; then
         echo "Invalid udev file detected, test most likely broke it"
+        exit 1
+    fi
+
+    # Check if the OOM killer got invoked - if that is the case our tests
+    # will most likely not function correctly anymore. It looks like this
+    # happens with: https://forum.snapcraft.io/t/4101 and is a source of
+    # failure in the autopkgtest environment.
+    if dmesg|grep "oom-killer"; then
+        echo "oom-killer got invoked during the tests, this should not happen."
+        echo "Dmesg debug output:"
+        dmesg
+        echo "Meminfo debug output:"
+        cat /proc/meminfo
         exit 1
     fi
 }
