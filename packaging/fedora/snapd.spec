@@ -70,7 +70,7 @@
 %endif
 
 Name:           snapd
-Version:        2.32.3.2
+Version:        2.32.5
 Release:        0%{?dist}
 Summary:        A transactional software package manager
 Group:          System Environment/Base
@@ -606,6 +606,7 @@ popd
 %{_unitdir}/snapd.autoimport.service
 %{_datadir}/dbus-1/services/io.snapcraft.Launcher.service
 %{_datadir}/polkit-1/actions/io.snapcraft.snapd.policy
+%{_sysconfdir}/xdg/autostart/snap-userd-autostart.desktop
 %config(noreplace) %{_sysconfdir}/sysconfig/snapd
 %dir %{_sharedstatedir}/snapd
 %dir %{_sharedstatedir}/snapd/assertions
@@ -710,6 +711,24 @@ fi
 
 
 %changelog
+* Mon Apr 16 2018 Michael Vogt <mvo@ubuntu.com>
+- New upstream release 2.32.5
+ - many: add "stop-mode: sig{term,hup,usr[12]}{,-all}" instead of
+   conflating that with refresh-mode
+ - overlord/snapstate:  poll for up to 10s if a snap is unexpectedly
+   not mounted in doMountSnap
+ - daemon: support 'system' as nickname of the core snapchange it is
+   possible to do:
+
+* Wed Apr 11 2018 Michael Vogt <mvo@ubuntu.com>
+- New upstream release 2.32.4
+ - cmd/snap: user session application autostart
+ - overlord/snapstate: introduce envvars to control the channels for
+   bases and prereqs
+ - overlord/snapstate: on multi-snap refresh make sure bases and core
+   are finished before dependent snaps
+ - many: use the new install/refresh /v2/snaps/refresh store API
+
 * Wed Apr 11 2018 Michael Vogt <mvo@ubuntu.com>
 - New upstream release 2.32.3.2
  - errtracker: make TestJournalErrorSilentError work on

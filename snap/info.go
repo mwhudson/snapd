@@ -304,12 +304,12 @@ func (s *Info) DataDir() string {
 
 // UserDataDir returns the user-specific data directory of the snap.
 func (s *Info) UserDataDir(home string) string {
-	return filepath.Join(home, "snap", s.Name(), s.Revision.String())
+	return filepath.Join(home, dirs.UserHomeSnapDir, s.Name(), s.Revision.String())
 }
 
 // UserCommonDataDir returns the user-specific data directory common across revision of the snap.
 func (s *Info) UserCommonDataDir(home string) string {
-	return filepath.Join(home, "snap", s.Name(), "common")
+	return filepath.Join(home, dirs.UserHomeSnapDir, s.Name(), "common")
 }
 
 // CommonDataDir returns the data directory common across revisions of the snap.
@@ -537,6 +537,33 @@ type TimerInfo struct {
 	Timer string
 }
 
+// StopModeType is the type for the "stop-mode:" of a snap app
+type StopModeType string
+
+// KillAll returns if the stop-mode means all processes should be killed
+// when the service is stopped or just the main process.
+func (st StopModeType) KillAll() bool {
+	return string(st) == "" || strings.HasSuffix(string(st), "-all")
+}
+
+// KillSignal returns the signal that should be used to kill the process
+// (or an empty string if no signal is needed)
+func (st StopModeType) KillSignal() string {
+	if st == "" {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimSuffix(string(st), "-all"))
+}
+
+func (st StopModeType) Valid() error {
+	switch st {
+	case "", "sigterm", "sigterm-all", "sighup", "sighup-all", "sigusr1", "sigusr1-all", "sigusr2", "sigusr2-all":
+		// valid
+		return nil
+	}
+	return fmt.Errorf(`"stop-mode" field contains invalid value %q`, st)
+}
+
 // AppInfo provides information about a app.
 type AppInfo struct {
 	Snap *Info
@@ -553,6 +580,7 @@ type AppInfo struct {
 	RestartCond     RestartCondition
 	Completer       string
 	RefreshMode     string
+	StopMode        StopModeType
 
 	// TODO: this should go away once we have more plumbing and can change
 	// things vs refactor
@@ -571,6 +599,8 @@ type AppInfo struct {
 	Before []string
 
 	Timer *TimerInfo
+
+	Autostart string
 }
 
 // ScreenshotInfo provides information about a screenshot.
@@ -760,6 +790,22 @@ func ReadInfo(name string, si *SideInfo) (*Info, error) {
 	}
 
 	return info, nil
+}
+
+// ReadCurrentInfo reads the snap information from the installed snap in 'current' revision
+func ReadCurrentInfo(snapName string) (*Info, error) {
+	curFn := filepath.Join(dirs.SnapMountDir, snapName, "current")
+	realFn, err := os.Readlink(curFn)
+	if err != nil {
+		return nil, fmt.Errorf("cannot find current revision for snap %s: %s", snapName, err)
+	}
+	rev := filepath.Base(realFn)
+	revision, err := ParseRevision(rev)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read revision %s: %s", rev, err)
+	}
+
+	return ReadInfo(snapName, &SideInfo{Revision: revision})
 }
 
 // ReadInfoFromSnapFile reads the snap information from the given File

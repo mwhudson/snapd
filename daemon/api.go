@@ -1165,7 +1165,13 @@ func (inst *snapInstruction) errToResponse(err error) Response {
 	var snapName string
 
 	switch err {
-	case store.ErrSnapNotFound:
+	case store.ErrSnapNotFound, store.ErrRevisionNotAvailable:
+		// TODO: treating ErrRevisionNotAvailable the same as
+		// ErrSnapNotFound preserves the old error handling
+		// behavior of the REST API and the snap command.  We
+		// should revisit this once the store returns more
+		// precise errors and makes it possible to distinguish
+		// the why a revision wasn't available.
 		switch len(inst.Snaps) {
 		case 1:
 			return SnapNotFound(inst.Snaps[0], err)
@@ -1593,7 +1599,7 @@ func splitQS(qs string) []string {
 
 func getSnapConf(c *Command, r *http.Request, user *auth.UserState) Response {
 	vars := muxVars(r)
-	snapName := vars["name"]
+	snapName := systemCoreSnapUnalias(vars["name"])
 
 	keys := splitQS(r.URL.Query().Get("keys"))
 
@@ -1636,7 +1642,7 @@ func getSnapConf(c *Command, r *http.Request, user *auth.UserState) Response {
 
 func setSnapConf(c *Command, r *http.Request, user *auth.UserState) Response {
 	vars := muxVars(r)
-	snapName := vars["name"]
+	snapName := systemCoreSnapUnalias(vars["name"])
 
 	var patchValues map[string]interface{}
 	if err := jsonutil.DecodeWithNumber(r.Body, &patchValues); err != nil {
@@ -2798,4 +2804,11 @@ func postApps(c *Command, r *http.Request, user *auth.UserState) Response {
 	chg := newChange(st, "service-control", fmt.Sprintf("Running service command"), []*state.TaskSet{ts}, inst.Names)
 	st.EnsureBefore(0)
 	return AsyncResponse(nil, &Meta{Change: chg.ID()})
+}
+
+func systemCoreSnapUnalias(name string) string {
+	if name == "system" {
+		return "core"
+	}
+	return name
 }
