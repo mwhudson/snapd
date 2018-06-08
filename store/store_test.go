@@ -1103,9 +1103,9 @@ func (s *storeTestSuite) TestUseDeltas(c *C) {
 		wantDelta bool
 	}{
 		{env: "", classic: false, exeInHost: false, exeInCore: false, wantDelta: false},
-		{env: "", classic: false, exeInHost: false, exeInCore: true, wantDelta: false},
-		{env: "", classic: false, exeInHost: true, exeInCore: false, wantDelta: false},
-		{env: "", classic: false, exeInHost: true, exeInCore: true, wantDelta: false},
+		{env: "", classic: false, exeInHost: false, exeInCore: true, wantDelta: true},
+		{env: "", classic: false, exeInHost: true, exeInCore: false, wantDelta: true},
+		{env: "", classic: false, exeInHost: true, exeInCore: true, wantDelta: true},
 		{env: "", classic: true, exeInHost: false, exeInCore: false, wantDelta: false},
 		{env: "", classic: true, exeInHost: false, exeInCore: true, wantDelta: true},
 		{env: "", classic: true, exeInHost: true, exeInCore: false, wantDelta: true},
@@ -2620,24 +2620,8 @@ func (s *storeTestSuite) TestNoDetails(c *C) {
 	c.Assert(result, IsNil)
 }
 
-func (s *storeTestSuite) TestStructFields(c *C) {
-	type aStruct struct {
-		Foo int `json:"hello"`
-		Bar int `json:"potato,stuff"`
-	}
-	c.Assert(getStructFields(aStruct{}), DeepEquals, []string{"hello", "potato"})
-}
-
-func (s *storeTestSuite) TestStructFieldsExcept(c *C) {
-	type aStruct struct {
-		Foo int `json:"hello"`
-		Bar int `json:"potato,stuff"`
-	}
-	c.Assert(getStructFields(aStruct{}, "potato"), DeepEquals, []string{"hello"})
-}
-
 /* acquired via:
-curl -s -H "accept: application/hal+json" -H "X-Ubuntu-Release: 16" -H "X-Ubuntu-Device-Channel: edge" -H "X-Ubuntu-Wire-Protocol: 1" -H "X-Ubuntu-Architecture: amd64"  'https://api.snapcraft.io/api/v1/snaps/search?fields=anon_download_url%2Carchitecture%2Cchannel%2Cdownload_sha512%2Csummary%2Cdescription%2Cbinary_filesize%2Cdownload_url%2Cicon_url%2Clast_updated%2Clicense%2Cpackage_name%2Cprices%2Cpublisher%2Cratings_average%2Crevision%2Cscreenshot_urls%2Csnap_id%2Csupport_url%2Ctitle%2Ccontent%2Cversion%2Corigin&q=hello' | python -m json.tool | xsel -b
+curl -s -H "accept: application/hal+json" -H "X-Ubuntu-Release: 16" -H "X-Ubuntu-Device-Channel: edge" -H "X-Ubuntu-Wire-Protocol: 1" -H "X-Ubuntu-Architecture: amd64"  'https://api.snapcraft.io/api/v1/snaps/search?fields=anon_download_url%2Carchitecture%2Cchannel%2Cdownload_sha512%2Csummary%2Cdescription%2Cbinary_filesize%2Cdownload_url%2Cicon_url%2Clast_updated%2Clicense%2Cpackage_name%2Cprices%2Cpublisher%2Cratings_average%2Crevision%2Cscreenshot_urls%2Csnap_id%2Csupport_url%2Ctitle%2Ccontent%2Cversion%2Corigin%2Ccommon_ids&q=hello' | python -m json.tool | xsel -b
 Screenshot URLS set manually.
 */
 const MockSearchJSON = `{
@@ -2650,6 +2634,7 @@ const MockSearchJSON = `{
                 ],
                 "binary_filesize": 20480,
                 "channel": "edge",
+                "common_ids": [],
                 "content": "application",
                 "description": "This is a simple hello world example.",
                 "download_sha512": "4bf23ce93efa1f32f0aeae7ec92564b7b0f9f8253a0bd39b2741219c1be119bb676c21208c6845ccf995e6aabe791d3f28a733ebcbbc3171bb23f67981f4068e",
@@ -2855,12 +2840,14 @@ const mockNamesJSON = `
         "apps": ["baz"],
         "title": "a title",
         "summary": "oneary plus twoary",
-        "package_name": "bar"
+        "package_name": "bar",
+        "version": "2.0"
       },
       {
         "aliases": [{"name": "meh", "target": "foo"}],
         "apps": ["foo"],
-        "package_name": "foo"
+        "package_name": "foo",
+        "version": "1.0"
       }
     ]
   }
@@ -2921,11 +2908,11 @@ func (s *storeTestSuite) testSnapCommands(c *C, onClassic bool) {
 
 	dump, err := advisor.DumpCommands()
 	c.Assert(err, IsNil)
-	c.Check(dump, DeepEquals, map[string][]string{
-		"foo":     {"foo"},
-		"bar.baz": {"bar"},
-		"potato":  {"bar"},
-		"meh":     {"bar", "foo"},
+	c.Check(dump, DeepEquals, map[string]string{
+		"foo":     `[{"snap":"foo","version":"1.0"}]`,
+		"bar.baz": `[{"snap":"bar","version":"2.0"}]`,
+		"potato":  `[{"snap":"bar","version":"2.0"}]`,
+		"meh":     `[{"snap":"bar","version":"2.0"},{"snap":"foo","version":"1.0"}]`,
 	})
 }
 
@@ -3145,6 +3132,47 @@ func (s *storeTestSuite) TestFindAuthFailed(c *C) {
 	c.Check(snaps[0].SnapID, Equals, helloWorldSnapID)
 	c.Check(snaps[0].Prices, DeepEquals, map[string]float64{"EUR": 2.99, "USD": 3.49})
 	c.Check(snaps[0].MustBuy, Equals, true)
+}
+
+func (s *storeTestSuite) TestFindCommonIDs(c *C) {
+	n := 0
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertRequest(c, r, "GET", searchPath)
+		query := r.URL.Query()
+
+		name := query.Get("name")
+		q := query.Get("q")
+
+		switch n {
+		case 0:
+			c.Check(r.URL.Path, Matches, ".*/search")
+			c.Check(name, Equals, "")
+			c.Check(q, Equals, "foo")
+		default:
+			c.Fatalf("what? %d", n)
+		}
+
+		w.Header().Set("Content-Type", "application/hal+json")
+		w.WriteHeader(200)
+		io.WriteString(w, strings.Replace(MockSearchJSON,
+			`"common_ids": []`,
+			`"common_ids": ["org.hello"]`, -1))
+
+		n++
+	}))
+	c.Assert(mockServer, NotNil)
+	defer mockServer.Close()
+
+	serverURL, _ := url.Parse(mockServer.URL)
+	cfg := Config{
+		StoreBaseURL: serverURL,
+	}
+	sto := New(&cfg, nil)
+
+	infos, err := sto.Find(&Search{Query: "foo"}, nil)
+	c.Check(err, IsNil)
+	c.Assert(infos, HasLen, 1)
+	c.Check(infos[0].CommonIDs, DeepEquals, []string{"org.hello"})
 }
 
 func (s *storeTestSuite) TestCurrentSnap(c *C) {
@@ -4073,7 +4101,7 @@ func (s *storeTestSuite) TestDefaultsDeltasOnClassicOnly(c *C) {
 		onClassic      bool
 		deltaFormatStr string
 	}{
-		{false, ""},
+		{true, "xdelta3"},
 		{true, "xdelta3"},
 	} {
 		restore := release.MockOnClassic(t.onClassic)
@@ -4125,7 +4153,7 @@ func (s *storeTestSuite) TestListRefreshWithDeltas(c *C) {
 			"epoch":       "0",
 			"confinement": "",
 		})
-		c.Assert(resp.Fields, DeepEquals, getStructFields(snapDetails{}, "snap_yaml_raw"))
+		c.Assert(resp.Fields, DeepEquals, getStructFields((*snapDetails)(nil), "snap_yaml_raw"))
 
 		io.WriteString(w, MockUpdatesWithDeltasJSON)
 	}))
@@ -4277,14 +4305,6 @@ func (s *storeTestSuite) TestListRefreshOptions(c *C) {
 		c.Assert(err, IsNil)
 		c.Check(mockServerHit, Equals, true)
 	}
-}
-
-func (s *storeTestSuite) TestStructFieldsSurvivesNoTag(c *C) {
-	type aStruct struct {
-		Foo int `json:"hello"`
-		Bar int
-	}
-	c.Assert(getStructFields(aStruct{}), DeepEquals, []string{"hello"})
 }
 
 func (s *storeTestSuite) TestAuthLocationDependsOnEnviron(c *C) {
@@ -6917,4 +6937,77 @@ func (s *storeTestSuite) TestSnapActionRefreshesBothAuths(c *C) {
 	c.Check(refreshDischargeEndpointHit, Equals, true)
 	c.Check(refreshSessionRequested, Equals, true)
 	c.Check(n, Equals, 2)
+}
+
+func (s *storeTestSuite) TestConnectivityCheckHappy(c *C) {
+	seenPaths := make(map[string]int, 2)
+	var mockServerURL *url.URL
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/snaps/details/core":
+			c.Check(r.Method, Equals, "GET")
+			c.Check(r.URL.Query().Encode(), DeepEquals, "fields=anon_download_url")
+			u, err := url.Parse("/download/core")
+			c.Assert(err, IsNil)
+			io.WriteString(w, fmt.Sprintf(`{"anon_download_url": %q}`, mockServerURL.ResolveReference(u).String()))
+		case "/download/core":
+			c.Check(r.Method, Equals, "HEAD")
+			w.WriteHeader(200)
+		default:
+			c.Fatalf("unexpected request: %s", r.URL.String())
+			return
+		}
+		seenPaths[r.URL.Path]++
+		return
+	}))
+	c.Assert(mockServer, NotNil)
+	defer mockServer.Close()
+	mockServerURL, _ = url.Parse(mockServer.URL)
+
+	sto := New(&Config{
+		StoreBaseURL: mockServerURL,
+	}, nil)
+	connectivity, err := sto.ConnectivityCheck()
+	c.Assert(err, IsNil)
+	// everything is the test server, here
+	c.Check(connectivity, DeepEquals, map[string]bool{
+		mockServerURL.Host: true,
+	})
+	c.Check(seenPaths, DeepEquals, map[string]int{
+		"/api/v1/snaps/details/core": 1,
+		"/download/core":             1,
+	})
+}
+
+func (s *storeTestSuite) TestConnectivityCheckUnhappy(c *C) {
+	seenPaths := make(map[string]int, 2)
+	var mockServerURL *url.URL
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/snaps/details/core":
+			w.WriteHeader(500)
+		default:
+			c.Fatalf("unexpected request: %s", r.URL.String())
+			return
+		}
+		seenPaths[r.URL.Path]++
+		return
+	}))
+	c.Assert(mockServer, NotNil)
+	defer mockServer.Close()
+	mockServerURL, _ = url.Parse(mockServer.URL)
+
+	sto := New(&Config{
+		StoreBaseURL: mockServerURL,
+	}, nil)
+	connectivity, err := sto.ConnectivityCheck()
+	c.Assert(err, IsNil)
+	// everything is the test server, here
+	c.Check(connectivity, DeepEquals, map[string]bool{
+		mockServerURL.Host: false,
+	})
+	// three because retries
+	c.Check(seenPaths, DeepEquals, map[string]int{
+		"/api/v1/snaps/details/core": 3,
+	})
 }

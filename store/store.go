@@ -85,118 +85,12 @@ var defaultRetryStrategy = retry.LimitCount(5, retry.LimitTime(38*time.Second,
 	},
 ))
 
-func infoFromRemote(d *snapDetails) *snap.Info {
-	info := &snap.Info{}
-	info.Architectures = d.Architectures
-	info.Type = d.Type
-	info.Version = d.Version
-	info.Epoch = d.Epoch
-	info.RealName = d.Name
-	info.SnapID = d.SnapID
-	info.Revision = snap.R(d.Revision)
-	info.EditedTitle = d.Title
-	info.EditedSummary = d.Summary
-	info.EditedDescription = d.Description
-	// Note that the store side is using confusing terminology here.
-	// What the store calls "developer" is actually the publisher
-	// username.
-	//
-	// It also sends "publisher" which is the "publisher display name"
-	// which we cannot use currently because it is not validated
-	// (i.e. the publisher could put anything in there and mislead
-	// the users this way).
-	info.Publisher = d.Developer
-	info.PublisherID = d.DeveloperID
-	info.Channel = d.Channel
-	info.Sha3_384 = d.DownloadSha3_384
-	info.Size = d.DownloadSize
-	info.IconURL = d.IconURL
-	info.AnonDownloadURL = d.AnonDownloadURL
-	info.DownloadURL = d.DownloadURL
-	info.Prices = d.Prices
-	info.Private = d.Private
-	info.Paid = len(info.Prices) > 0
-	info.Confinement = snap.ConfinementType(d.Confinement)
-	info.Contact = d.Contact
-	info.License = d.License
-	info.Base = d.Base
-
-	deltas := make([]snap.DeltaInfo, len(d.Deltas))
-	for i, d := range d.Deltas {
-		deltas[i] = snap.DeltaInfo{
-			FromRevision:    d.FromRevision,
-			ToRevision:      d.ToRevision,
-			Format:          d.Format,
-			AnonDownloadURL: d.AnonDownloadURL,
-			DownloadURL:     d.DownloadURL,
-			Size:            d.Size,
-			Sha3_384:        d.Sha3_384,
-		}
-	}
-	info.Deltas = deltas
-
-	screenshots := make([]snap.ScreenshotInfo, 0, len(d.ScreenshotURLs))
-	for _, url := range d.ScreenshotURLs {
-		screenshots = append(screenshots, snap.ScreenshotInfo{
-			URL: url,
-		})
-	}
-	info.Screenshots = screenshots
-	// FIXME: once the store sends "contact" for everything, remove
-	//        the "SupportURL" part of the if
-	if info.Contact == "" {
-		info.Contact = d.SupportURL
-	}
-
-	// fill in the plug/slot data
-	if rawYamlInfo, err := snap.InfoFromSnapYaml([]byte(d.SnapYAML)); err == nil {
-		if info.Plugs == nil {
-			info.Plugs = make(map[string]*snap.PlugInfo)
-		}
-		for k, v := range rawYamlInfo.Plugs {
-			info.Plugs[k] = v
-			info.Plugs[k].Snap = info
-		}
-		if info.Slots == nil {
-			info.Slots = make(map[string]*snap.SlotInfo)
-		}
-		for k, v := range rawYamlInfo.Slots {
-			info.Slots[k] = v
-			info.Slots[k].Snap = info
-		}
-	}
-
-	// fill in the tracks data
-	if len(d.ChannelMapList) > 0 {
-		info.Channels = make(map[string]*snap.ChannelSnapInfo)
-		info.Tracks = make([]string, len(d.ChannelMapList))
-		for i, cm := range d.ChannelMapList {
-			info.Tracks[i] = cm.Track
-			for _, ch := range cm.SnapDetails {
-				// nothing in this channel
-				if ch.Info == "" {
-					continue
-				}
-				var k string
-				if strings.HasPrefix(ch.Channel, cm.Track) {
-					k = ch.Channel
-				} else {
-					k = fmt.Sprintf("%s/%s", cm.Track, ch.Channel)
-				}
-				info.Channels[k] = &snap.ChannelSnapInfo{
-					Revision:    snap.R(ch.Revision),
-					Confinement: snap.ConfinementType(ch.Confinement),
-					Version:     ch.Version,
-					Channel:     ch.Channel,
-					Epoch:       ch.Epoch,
-					Size:        ch.DownloadSize,
-				}
-			}
-		}
-	}
-
-	return info
-}
+var connCheckStrategy = retry.LimitCount(3, retry.LimitTime(38*time.Second,
+	retry.Exponential{
+		Initial: 900 * time.Millisecond,
+		Factor:  1.3,
+	},
+))
 
 // Config represents the configuration to access the snap store
 type Config struct {
@@ -272,7 +166,7 @@ func respToError(resp *http.Response, msg string) error {
 }
 
 func getStructFields(s interface{}, exceptions ...string) []string {
-	st := reflect.TypeOf(s)
+	st := reflect.TypeOf(s).Elem()
 	num := st.NumField()
 	fields := make([]string, 0, num)
 	for i := 0; i < num; i++ {
@@ -297,8 +191,7 @@ func useDeltas() bool {
 		return false
 	}
 
-	deltasDefault := release.OnClassic
-	return osutil.GetenvBool("SNAPD_USE_DELTAS_EXPERIMENTAL", deltasDefault)
+	return osutil.GetenvBool("SNAPD_USE_DELTAS_EXPERIMENTAL", true)
 }
 
 func useStaging() bool {
@@ -381,11 +274,13 @@ func authURL() string {
 	return "https://" + authLocation() + "/api/v2"
 }
 
+var defaultStoreDeveloperURL = "https://dashboard.snapcraft.io/"
+
 func storeDeveloperURL() string {
 	if useStaging() {
 		return "https://dashboard.staging.snapcraft.io/"
 	}
-	return "https://dashboard.snapcraft.io/"
+	return defaultStoreDeveloperURL
 }
 
 var defaultConfig = Config{}
@@ -423,7 +318,7 @@ type sectionResults struct {
 }
 
 // The fields we are interested in (not you, snap_yaml_raw)
-var detailFields = getStructFields(snapDetails{}, "snap_yaml_raw")
+var detailFields = getStructFields((*snapDetails)(nil), "snap_yaml_raw")
 
 // The default delta format if not configured.
 var defaultSupportedDeltaFormat = "xdelta3"
@@ -570,14 +465,9 @@ func LoginUser(username, password, otp string) (string, string, error) {
 	return macaroon, discharge, nil
 }
 
-// hasStoreAuth returns true if given user has store macaroons setup
-func hasStoreAuth(user *auth.UserState) bool {
-	return user != nil && user.StoreMacaroon != ""
-}
-
 // authAvailable returns true if there is a user and/or device session setup
 func (s *Store) authAvailable(user *auth.UserState) (bool, error) {
-	if hasStoreAuth(user) {
+	if user.HasStoreAuth() {
 		return true, nil
 	} else {
 		var device *auth.DeviceState
@@ -789,13 +679,14 @@ type alias struct {
 
 type catalogItem struct {
 	Name    string   `json:"package_name"`
+	Version string   `json:"version"`
 	Summary string   `json:"summary"`
 	Aliases []alias  `json:"aliases"`
 	Apps    []string `json:"apps"`
 }
 
 type SnapAdder interface {
-	AddSnap(snapName, summary string, commands []string) error
+	AddSnap(snapName, version, summary string, commands []string) error
 }
 
 func decodeCatalog(resp *http.Response, names io.Writer, db SnapAdder) error {
@@ -836,7 +727,7 @@ func decodeCatalog(resp *http.Response, names io.Writer, db SnapAdder) error {
 			commands = append(commands, snap.JoinSnapApp(v.Name, app))
 		}
 
-		if err := db.AddSnap(v.Name, v.Summary, commands); err != nil {
+		if err := db.AddSnap(v.Name, v.Version, v.Summary, commands); err != nil {
 			return err
 		}
 	}
@@ -987,7 +878,7 @@ func (s *Store) newRequest(reqOptions *requestOptions, user *auth.UserState) (*h
 	}
 
 	// only set user authentication if user logged in to the store
-	if hasStoreAuth(user) {
+	if user.HasStoreAuth() {
 		authenticateUser(req, user)
 	}
 
@@ -1682,6 +1573,19 @@ func (s *Store) Download(ctx context.Context, name string, targetPath string, do
 	return s.cacher.Put(downloadInfo.Sha3_384, targetPath)
 }
 
+func downloadOptions(storeURL *url.URL, cdnHeader string) *requestOptions {
+	reqOptions := requestOptions{
+		Method:       "GET",
+		URL:          storeURL,
+		ExtraHeaders: map[string]string{},
+	}
+	if cdnHeader != "" {
+		reqOptions.ExtraHeaders["Snap-CDN"] = cdnHeader
+	}
+
+	return &reqOptions
+}
+
 // download writes an http.Request showing a progress.Meter
 var download = func(ctx context.Context, name, sha3_384, downloadURL string, user *auth.UserState, s *Store, w io.ReadWriteSeeker, resume int64, pbar progress.Meter) error {
 	storeURL, err := url.Parse(downloadURL)
@@ -1697,14 +1601,7 @@ var download = func(ctx context.Context, name, sha3_384, downloadURL string, use
 	var finalErr error
 	startTime := time.Now()
 	for attempt := retry.Start(defaultRetryStrategy, nil); attempt.Next(); {
-		reqOptions := &requestOptions{
-			Method:       "GET",
-			URL:          storeURL,
-			ExtraHeaders: make(map[string]string),
-		}
-		if cdnHeader != "" {
-			reqOptions.ExtraHeaders["Snap-CDN"] = cdnHeader
-		}
+		reqOptions := downloadOptions(storeURL, cdnHeader)
 
 		httputil.MaybeLogRetryAttempt(reqOptions.URL.String(), attempt, startTime)
 
@@ -2243,7 +2140,7 @@ type snapActionResultList struct {
 	} `json:"error-list"`
 }
 
-var snapActionFields = getStructFields(storeSnap{})
+var snapActionFields = getStructFields((*storeSnap)(nil))
 
 // SnapAction queries the store for snap information for the given
 // install/refresh actions, given the context information about
@@ -2458,4 +2355,81 @@ func (s *Store) snapAction(ctx context.Context, currentSnaps []*CurrentSnap, act
 	}
 
 	return snaps, nil
+}
+
+var errUnexpectedConnCheckResponse = errors.New("unexpected response during connection check")
+
+func (s *Store) snapConnCheck() ([]string, error) {
+	var hosts []string
+	// TODO: move this to SnapAction:download when that's done (and maybe
+	//       avoid doRequest with its compulsory macaroon refresh dance)
+	// NOTE: "core" is possibly the only snap that's sure to be in all stores
+	//       when we drop "core" in the move to snapd/core18/etc, change this
+	deetsURL := s.endpointURL(path.Join(detailsEndpPath, "core"), url.Values{"fields": {"anon_download_url"}})
+	hosts = append(hosts, deetsURL.Host)
+
+	var remote snapDetails
+	resp, err := httputil.RetryRequest(deetsURL.String(), func() (*http.Response, error) {
+		return s.doRequest(context.TODO(), s.client, &requestOptions{Method: "GET", URL: deetsURL}, nil)
+	}, func(resp *http.Response) error {
+		return decodeJSONBody(resp, &remote, nil)
+	}, connCheckStrategy)
+
+	if err != nil {
+		return hosts, err
+	}
+	resp.Body.Close()
+
+	dlURL, err := url.ParseRequestURI(remote.AnonDownloadURL)
+	if err != nil {
+		return hosts, err
+	}
+	hosts = append(hosts, dlURL.Host)
+
+	cdnHeader, err := s.cdnHeader()
+	if err != nil {
+		return hosts, err
+	}
+
+	reqOptions := downloadOptions(dlURL, cdnHeader)
+	reqOptions.Method = "HEAD" // not actually a download
+
+	// TODO: We need the HEAD here so that we get redirected to the
+	//       right CDN machine. Consider just doing a "net.Dial"
+	//       after the redirect here. Suggested in
+	// https://github.com/snapcore/snapd/pull/5176#discussion_r193437230
+	resp, err = httputil.RetryRequest(remote.AnonDownloadURL, func() (*http.Response, error) {
+		return s.doRequest(context.TODO(), s.client, reqOptions, nil)
+	}, func(resp *http.Response) error {
+		// account for redirect
+		hosts[len(hosts)-1] = resp.Request.URL.Host
+		return nil
+	}, connCheckStrategy)
+	if err != nil {
+		return hosts, err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return hosts, errUnexpectedConnCheckResponse
+	}
+
+	return hosts, nil
+}
+
+func (s *Store) ConnectivityCheck() (status map[string]bool, err error) {
+	status = make(map[string]bool)
+
+	checkers := []func() ([]string, error){
+		s.snapConnCheck,
+	}
+
+	for _, checker := range checkers {
+		hosts, err := checker()
+		for _, host := range hosts {
+			status[host] = (err == nil)
+		}
+	}
+
+	return status, nil
 }

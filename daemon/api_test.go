@@ -106,6 +106,8 @@ type apiBaseSuite struct {
 	jctlRCs            []io.ReadCloser
 	jctlErrs           []error
 
+	connectivityResult map[string]bool
+
 	restoreSanitize func()
 }
 
@@ -151,6 +153,10 @@ func (s *apiBaseSuite) Buy(options *store.BuyOptions, user *auth.UserState) (*st
 func (s *apiBaseSuite) ReadyToBuy(user *auth.UserState) error {
 	s.user = user
 	return s.err
+}
+
+func (s *apiBaseSuite) ConnectivityCheck() (map[string]bool, error) {
+	return s.connectivityResult, s.err
 }
 
 func (s *apiBaseSuite) muxVars(*http.Request) map[string]string {
@@ -505,6 +511,9 @@ apps:
     command: some.cmd
   cmd2:
     command: other.cmd
+  cmd3:
+    command: other.cmd
+    common-id: org.foo.cmd
   svc1:
     command: somed1
     daemon: simple
@@ -604,6 +613,10 @@ UnitFileState=potatoes
 					// no desktop file
 					Snap: "foo", Name: "cmd2",
 				}, {
+					// has AppStream ID
+					Snap: "foo", Name: "cmd3",
+					CommonID: "org.foo.cmd",
+				}, {
 					// services
 					Snap: "foo", Name: "svc1",
 					Daemon:  "simple",
@@ -619,17 +632,17 @@ UnitFileState=potatoes
 					Daemon:  "oneshot",
 					Enabled: true,
 					Active:  true,
-				},
-				{
+				}, {
 					Snap: "foo", Name: "svc4",
 					Daemon:  "notify",
 					Enabled: false,
 					Active:  false,
 				},
 			},
-			Broken:  "",
-			Contact: "",
-			License: "GPL-3.0",
+			Broken:    "",
+			Contact:   "",
+			License:   "GPL-3.0",
+			CommonIDs: []string{"org.foo.cmd"},
 		},
 		Meta: meta,
 	}
@@ -740,6 +753,11 @@ func (s *apiSuite) TestSysInfo(c *check.C) {
 	defer restore()
 	restore = release.MockForcedDevmode(true)
 	defer restore()
+	// reload dirs for release info to have effect
+	dirs.SetRootDir(dirs.GlobalRootDir)
+
+	buildID, err := osutil.MyBuildID()
+	c.Assert(err, check.IsNil)
 
 	sysInfoCmd.GET(sysInfoCmd, nil, nil).ServeHTTP(rec, nil)
 	c.Check(rec.Code, check.Equals, 200)
@@ -752,6 +770,7 @@ func (s *apiSuite) TestSysInfo(c *check.C) {
 			"id":         "distro-id",
 			"version-id": "1.2",
 		},
+		"build-id":   buildID,
 		"on-classic": true,
 		"managed":    false,
 		"locations": map[string]interface{}{
@@ -762,7 +781,8 @@ func (s *apiSuite) TestSysInfo(c *check.C) {
 			// only the "timer" field
 			"timer": "8:00~9:00/2",
 		},
-		"confinement": "partial",
+		"confinement":      "partial",
+		"sandbox-features": map[string]interface{}{"confinement-options": []interface{}{"classic", "devmode"}},
 	}
 	var rsp resp
 	c.Assert(json.Unmarshal(rec.Body.Bytes(), &rsp), check.IsNil)
@@ -787,6 +807,8 @@ func (s *apiSuite) TestSysInfoLegacyRefresh(c *check.C) {
 	defer restore()
 	restore = release.MockForcedDevmode(true)
 	defer restore()
+	// reload dirs for release info to have effect
+	dirs.SetRootDir(dirs.GlobalRootDir)
 
 	// set the legacy refresh schedule
 	st := d.overlord.State()
@@ -796,6 +818,16 @@ func (s *apiSuite) TestSysInfoLegacyRefresh(c *check.C) {
 	tr.Set("core", "refresh.timer", "")
 	tr.Commit()
 	st.Unlock()
+
+	// add a test security backend
+	err := d.overlord.InterfaceManager().Repository().AddBackend(&ifacetest.TestSecurityBackend{
+		BackendName:             "apparmor",
+		SandboxFeaturesCallback: func() []string { return []string{"feature-1", "feature-2"} },
+	})
+	c.Assert(err, check.IsNil)
+
+	buildID, err := osutil.MyBuildID()
+	c.Assert(err, check.IsNil)
 
 	sysInfoCmd.GET(sysInfoCmd, nil, nil).ServeHTTP(rec, nil)
 	c.Check(rec.Code, check.Equals, 200)
@@ -808,6 +840,7 @@ func (s *apiSuite) TestSysInfoLegacyRefresh(c *check.C) {
 			"id":         "distro-id",
 			"version-id": "1.2",
 		},
+		"build-id":   buildID,
 		"on-classic": true,
 		"managed":    false,
 		"locations": map[string]interface{}{
@@ -819,6 +852,10 @@ func (s *apiSuite) TestSysInfoLegacyRefresh(c *check.C) {
 			"schedule": "00:00-9:00/12:00-13:00",
 		},
 		"confinement": "partial",
+		"sandbox-features": map[string]interface{}{
+			"apparmor":            []interface{}{"feature-1", "feature-2"},
+			"confinement-options": []interface{}{"classic", "devmode"}, // we know it's this because of the release.Mock... calls above
+		},
 	}
 	var rsp resp
 	c.Assert(json.Unmarshal(rec.Body.Bytes(), &rsp), check.IsNil)
@@ -1607,6 +1644,28 @@ func (s *apiSuite) TestFindSection(c *check.C) {
 		Query:   "foo",
 		Section: "bar",
 	})
+}
+
+func (s *apiSuite) TestFindCommonID(c *check.C) {
+	s.daemon(c)
+
+	s.rsnaps = []*snap.Info{{
+		SideInfo: snap.SideInfo{
+			RealName: "store",
+		},
+		Publisher: "foo",
+		CommonIDs: []string{"org.foo"},
+	}}
+	s.mockSnap(c, "name: store\nversion: 1.0")
+
+	req, err := http.NewRequest("GET", "/v2/find?name=foo", nil)
+	c.Assert(err, check.IsNil)
+
+	rsp := searchStore(findCmd, req, nil).(*resp)
+
+	snaps := snapList(rsp.Result)
+	c.Assert(snaps, check.HasLen, 1)
+	c.Check(snaps[0]["common-ids"], check.DeepEquals, []interface{}{"org.foo"})
 }
 
 func (s *apiSuite) TestFindOne(c *check.C) {
@@ -2686,7 +2745,7 @@ version: 1
 	d.overlord.Loop()
 	defer d.overlord.Stop()
 
-	text, err := json.Marshal(map[string]interface{}{"key": "value"})
+	text, err := json.Marshal(map[string]interface{}{"proxy.ftp": "value"})
 	c.Assert(err, check.IsNil)
 
 	buffer := bytes.NewBuffer(text)
@@ -2714,12 +2773,14 @@ version: 1
 
 	st.Lock()
 	err = chg.Err()
+	c.Assert(err, check.IsNil)
+
 	tr := config.NewTransaction(st)
 	st.Unlock()
 	c.Assert(err, check.IsNil)
 
 	var value string
-	tr.Get("core", "key", &value)
+	tr.Get("core", "proxy.ftp", &value)
 	c.Assert(value, check.Equals, "value")
 
 }
@@ -3494,18 +3555,20 @@ func snapList(rawSnaps interface{}) []map[string]interface{} {
 // Tests for GET /v2/interfaces
 
 func (s *apiSuite) TestInterfaces(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	d := s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
 	s.mockSnap(c, producerYaml)
 
 	repo := d.overlord.InterfaceManager().Repository()
-	connRef := interfaces.ConnRef{
+	connRef := &interfaces.ConnRef{
 		PlugRef: interfaces.PlugRef{Snap: "consumer", Name: "plug"},
 		SlotRef: interfaces.SlotRef{Snap: "producer", Name: "slot"},
 	}
-	c.Assert(repo.Connect(connRef), check.IsNil)
+	_, err := repo.Connect(connRef, nil, nil, nil)
+	c.Assert(err, check.IsNil)
 
 	req, err := http.NewRequest("GET", "/v2/interfaces", nil)
 	c.Assert(err, check.IsNil)
@@ -3672,7 +3735,8 @@ func (s *apiSuite) TestInterfaceDetail404(c *check.C) {
 // Test for POST /v2/interfaces
 
 func (s *apiSuite) TestConnectPlugSuccess(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	d := s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
@@ -3833,19 +3897,69 @@ func (s *apiSuite) TestConnectPlugFailureNoSuchSlot(c *check.C) {
 	c.Assert(ifaces.Connections, check.HasLen, 0)
 }
 
+func (s *apiSuite) TestConnectCoreSystemAlias(c *check.C) {
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
+	d := s.daemon(c)
+
+	s.mockSnap(c, consumerYaml)
+	s.mockSnap(c, coreProducerYaml)
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+
+	action := &interfaceAction{
+		Action: "connect",
+		Plugs:  []plugJSON{{Snap: "consumer", Name: "plug"}},
+		Slots:  []slotJSON{{Snap: "system", Name: "slot"}},
+	}
+	text, err := json.Marshal(action)
+	c.Assert(err, check.IsNil)
+	buf := bytes.NewBuffer(text)
+	req, err := http.NewRequest("POST", "/v2/interfaces", buf)
+	c.Assert(err, check.IsNil)
+	rec := httptest.NewRecorder()
+	interfacesCmd.POST(interfacesCmd, req, nil).ServeHTTP(rec, req)
+	c.Check(rec.Code, check.Equals, 202)
+	var body map[string]interface{}
+	err = json.Unmarshal(rec.Body.Bytes(), &body)
+	c.Check(err, check.IsNil)
+	id := body["change"].(string)
+
+	st := d.overlord.State()
+	st.Lock()
+	chg := st.Change(id)
+	st.Unlock()
+	c.Assert(chg, check.NotNil)
+
+	<-chg.Ready()
+
+	st.Lock()
+	err = chg.Err()
+	st.Unlock()
+	c.Assert(err, check.IsNil)
+
+	repo := d.overlord.InterfaceManager().Repository()
+	ifaces := repo.Interfaces()
+	c.Assert(ifaces.Connections, check.HasLen, 1)
+	c.Check(ifaces.Connections, check.DeepEquals, []*interfaces.ConnRef{{interfaces.PlugRef{Snap: "consumer", Name: "plug"}, interfaces.SlotRef{Snap: "core", Name: "slot"}}})
+}
+
 func (s *apiSuite) testDisconnect(c *check.C, plugSnap, plugName, slotSnap, slotName string) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	d := s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
 	s.mockSnap(c, producerYaml)
 
 	repo := d.overlord.InterfaceManager().Repository()
-	connRef := interfaces.ConnRef{
+	connRef := &interfaces.ConnRef{
 		PlugRef: interfaces.PlugRef{Snap: "consumer", Name: "plug"},
 		SlotRef: interfaces.SlotRef{Snap: "producer", Name: "slot"},
 	}
-	c.Assert(repo.Connect(connRef), check.IsNil)
+	_, err := repo.Connect(connRef, nil, nil, nil)
+	c.Assert(err, check.IsNil)
 
 	d.overlord.Loop()
 	defer d.overlord.Stop()
@@ -3898,7 +4012,8 @@ func (s *apiSuite) TestDisconnectPlugSuccessWithEmptySlot(c *check.C) {
 }
 
 func (s *apiSuite) TestDisconnectPlugFailureNoSuchPlug(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	s.daemon(c)
 
 	// there is no consumer, no plug defined
@@ -3931,7 +4046,8 @@ func (s *apiSuite) TestDisconnectPlugFailureNoSuchPlug(c *check.C) {
 }
 
 func (s *apiSuite) TestDisconnectPlugNothingToDo(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
@@ -3965,7 +4081,8 @@ func (s *apiSuite) TestDisconnectPlugNothingToDo(c *check.C) {
 }
 
 func (s *apiSuite) TestDisconnectPlugFailureNoSuchSlot(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
@@ -3999,7 +4116,8 @@ func (s *apiSuite) TestDisconnectPlugFailureNoSuchSlot(c *check.C) {
 }
 
 func (s *apiSuite) TestDisconnectPlugFailureNotConnected(c *check.C) {
-	builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
 	s.daemon(c)
 
 	s.mockSnap(c, consumerYaml)
@@ -4030,6 +4148,60 @@ func (s *apiSuite) TestDisconnectPlugFailureNotConnected(c *check.C) {
 		"status-code": 400.0,
 		"type":        "error",
 	})
+}
+
+func (s *apiSuite) TestDisconnectCoreSystemAlias(c *check.C) {
+	revert := builtin.MockInterface(&ifacetest.TestInterface{InterfaceName: "test"})
+	defer revert()
+	d := s.daemon(c)
+
+	s.mockSnap(c, consumerYaml)
+	s.mockSnap(c, coreProducerYaml)
+
+	repo := d.overlord.InterfaceManager().Repository()
+	connRef := &interfaces.ConnRef{
+		PlugRef: interfaces.PlugRef{Snap: "consumer", Name: "plug"},
+		SlotRef: interfaces.SlotRef{Snap: "core", Name: "slot"},
+	}
+	_, err := repo.Connect(connRef, nil, nil, nil)
+	c.Assert(err, check.IsNil)
+
+	d.overlord.Loop()
+	defer d.overlord.Stop()
+
+	action := &interfaceAction{
+		Action: "disconnect",
+		Plugs:  []plugJSON{{Snap: "consumer", Name: "plug"}},
+		Slots:  []slotJSON{{Snap: "system", Name: "slot"}},
+	}
+	text, err := json.Marshal(action)
+	c.Assert(err, check.IsNil)
+	buf := bytes.NewBuffer(text)
+	req, err := http.NewRequest("POST", "/v2/interfaces", buf)
+	c.Assert(err, check.IsNil)
+	rec := httptest.NewRecorder()
+	interfacesCmd.POST(interfacesCmd, req, nil).ServeHTTP(rec, req)
+	c.Check(rec.Code, check.Equals, 202)
+	var body map[string]interface{}
+	err = json.Unmarshal(rec.Body.Bytes(), &body)
+	c.Check(err, check.IsNil)
+	id := body["change"].(string)
+
+	st := d.overlord.State()
+	st.Lock()
+	chg := st.Change(id)
+	st.Unlock()
+	c.Assert(chg, check.NotNil)
+
+	<-chg.Ready()
+
+	st.Lock()
+	err = chg.Err()
+	st.Unlock()
+	c.Assert(err, check.IsNil)
+
+	ifaces := repo.Interfaces()
+	c.Assert(ifaces.Connections, check.HasLen, 0)
 }
 
 func (s *apiSuite) TestUnsupportedInterfaceRequest(c *check.C) {
@@ -5940,6 +6112,48 @@ func (s *postDebugSuite) TestPostDebugGetBaseDeclaration(c *check.C) {
 		testutil.Contains, "type: base-declaration")
 }
 
+func (s *postDebugSuite) TestPostDebugConnectivityHappy(c *check.C) {
+	_ = s.daemon(c)
+
+	buf := bytes.NewBufferString(`{"action": "connectivity"}`)
+	req, err := http.NewRequest("POST", "/v2/debug", buf)
+	c.Assert(err, check.IsNil)
+
+	s.connectivityResult = map[string]bool{
+		"good.host.com":         true,
+		"another.good.host.com": true,
+	}
+
+	rsp := postDebug(debugCmd, req, nil).(*resp)
+
+	c.Check(rsp.Type, check.Equals, ResponseTypeSync)
+	c.Check(rsp.Result, check.DeepEquals, ConnectivityStatus{
+		Connectivity: true,
+		Unreachable:  []string(nil),
+	})
+}
+
+func (s *postDebugSuite) TestPostDebugConnectivityUnhappy(c *check.C) {
+	_ = s.daemon(c)
+
+	buf := bytes.NewBufferString(`{"action": "connectivity"}`)
+	req, err := http.NewRequest("POST", "/v2/debug", buf)
+	c.Assert(err, check.IsNil)
+
+	s.connectivityResult = map[string]bool{
+		"good.host.com": true,
+		"bad.host.com":  false,
+	}
+
+	rsp := postDebug(debugCmd, req, nil).(*resp)
+
+	c.Check(rsp.Type, check.Equals, ResponseTypeSync)
+	c.Check(rsp.Result, check.DeepEquals, ConnectivityStatus{
+		Connectivity: false,
+		Unreachable:  []string{"bad.host.com"},
+	})
+}
+
 type appSuite struct {
 	apiBaseSuite
 	cmd *testutil.MockCmd
@@ -6372,7 +6586,7 @@ func (s *appSuite) TestLogsSad(c *check.C) {
 	c.Assert(rsp.Type, check.Equals, ResponseTypeError)
 }
 
-func (s *appSuite) testPostApps(c *check.C, inst servicestate.Instruction, systemctlCall []string) *state.Change {
+func (s *appSuite) testPostApps(c *check.C, inst servicestate.Instruction, systemctlCall [][]string) *state.Change {
 	postBody, err := json.Marshal(inst)
 	c.Assert(err, check.IsNil)
 
@@ -6389,25 +6603,25 @@ func (s *appSuite) testPostApps(c *check.C, inst servicestate.Instruction, syste
 	defer st.Unlock()
 	chg := st.Change(rsp.Change)
 	c.Assert(chg, check.NotNil)
-	c.Check(chg.Tasks(), check.HasLen, 1)
+	c.Check(chg.Tasks(), check.HasLen, len(systemctlCall))
 
 	st.Unlock()
 	<-chg.Ready()
 	st.Lock()
 
-	c.Check(s.cmd.Calls(), check.DeepEquals, [][]string{systemctlCall})
+	c.Check(s.cmd.Calls(), check.DeepEquals, systemctlCall)
 	return chg
 }
 
 func (s *appSuite) TestPostAppsStartOne(c *check.C) {
 	inst := servicestate.Instruction{Action: "start", Names: []string{"snap-a.svc2"}}
-	expected := []string{"systemctl", "start", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "start", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 
 func (s *appSuite) TestPostAppsStartTwo(c *check.C) {
 	inst := servicestate.Instruction{Action: "start", Names: []string{"snap-a"}}
-	expected := []string{"systemctl", "start", "snap.snap-a.svc1.service", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "start", "snap.snap-a.svc1.service", "snap.snap-a.svc2.service"}}
 	chg := s.testPostApps(c, inst, expected)
 	chg.State().Lock()
 	defer chg.State().Unlock()
@@ -6418,7 +6632,7 @@ func (s *appSuite) TestPostAppsStartTwo(c *check.C) {
 
 func (s *appSuite) TestPostAppsStartThree(c *check.C) {
 	inst := servicestate.Instruction{Action: "start", Names: []string{"snap-a", "snap-b"}}
-	expected := []string{"systemctl", "start", "snap.snap-a.svc1.service", "snap.snap-a.svc2.service", "snap.snap-b.svc3.service"}
+	expected := [][]string{{"systemctl", "start", "snap.snap-a.svc1.service", "snap.snap-a.svc2.service", "snap.snap-b.svc3.service"}}
 	chg := s.testPostApps(c, inst, expected)
 	// check the summary expands the snap into actual apps
 	c.Check(chg.Summary(), check.Equals, "Running service command")
@@ -6429,34 +6643,34 @@ func (s *appSuite) TestPostAppsStartThree(c *check.C) {
 
 func (s *appSuite) TestPosetAppsStop(c *check.C) {
 	inst := servicestate.Instruction{Action: "stop", Names: []string{"snap-a.svc2"}}
-	expected := []string{"systemctl", "stop", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "stop", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 
 func (s *appSuite) TestPosetAppsRestart(c *check.C) {
 	inst := servicestate.Instruction{Action: "restart", Names: []string{"snap-a.svc2"}}
-	expected := []string{"systemctl", "restart", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "restart", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 
 func (s *appSuite) TestPosetAppsReload(c *check.C) {
 	inst := servicestate.Instruction{Action: "restart", Names: []string{"snap-a.svc2"}}
 	inst.Reload = true
-	expected := []string{"systemctl", "reload-or-restart", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "reload-or-restart", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 
 func (s *appSuite) TestPosetAppsEnableNow(c *check.C) {
 	inst := servicestate.Instruction{Action: "start", Names: []string{"snap-a.svc2"}}
 	inst.Enable = true
-	expected := []string{"systemctl", "enable", "--now", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "enable", "snap.snap-a.svc2.service"}, {"systemctl", "start", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 
 func (s *appSuite) TestPosetAppsDisableNow(c *check.C) {
 	inst := servicestate.Instruction{Action: "stop", Names: []string{"snap-a.svc2"}}
 	inst.Disable = true
-	expected := []string{"systemctl", "disable", "--now", "snap.snap-a.svc2.service"}
+	expected := [][]string{{"systemctl", "disable", "snap.snap-a.svc2.service"}, {"systemctl", "stop", "snap.snap-a.svc2.service"}}
 	s.testPostApps(c, inst, expected)
 }
 

@@ -35,17 +35,38 @@ import (
 )
 
 // Regular expressions describing correct identifiers.
-//
-// validSnapName is also used to validate socket identifiers.
-var validSnapName = regexp.MustCompile("^(?:[a-z0-9]+-?)*[a-z](?:-?[a-z0-9])*$")
 var validHookName = regexp.MustCompile("^[a-z](?:-?[a-z0-9])*$")
+
+// almostValidName is part of snap and socket name validation.
+//   the full regexp we could use, "^(?:[a-z0-9]+-?)*[a-z](?:-?[a-z0-9])*$", is
+//   O(2ⁿ) on the length of the string in python. An equivalent regexp that
+//   doesn't have the nested quantifiers that trip up Python's re would be
+//   "^(?:[a-z0-9]|(?<=[a-z0-9])-)*[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$", but Go's
+//   regexp package doesn't support look-aheads nor look-behinds, so in order to
+//   have a unified implementation in the Go and Python bits of the project
+//   we're doing it this way instead. Check the length (if applicable), check
+//   this regexp, then check the dashes.
+//   This still leaves sc_snap_name_validate (in cmd/snap-confine/snap.c) and
+//   snap_validate (cmd/snap-update-ns/bootstrap.c) with their own handcrafted
+//   validators.
+var almostValidName = regexp.MustCompile("^[a-z0-9-]*[a-z][a-z0-9-]*$")
+
+// isValidName checks snap and socket socket identifiers.
+func isValidName(name string) bool {
+	if !almostValidName.MatchString(name) {
+		return false
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' || strings.Contains(name, "--") {
+		return false
+	}
+	return true
+}
 
 // ValidateName checks if a string can be used as a snap name.
 func ValidateName(name string) error {
 	// NOTE: This function should be synchronized with the two other
 	// implementations: sc_snap_name_validate and validate_snap_name .
-	valid := validSnapName.MatchString(name)
-	if !valid {
+	if len(name) > 40 || !isValidName(name) {
 		return fmt.Errorf("invalid snap name: %q", name)
 	}
 	return nil
@@ -144,8 +165,7 @@ func ValidateAlias(alias string) error {
 // validateSocketName checks if a string ca be used as a name for a socket (for
 // socket activation).
 func validateSocketName(name string) error {
-	valid := validSnapName.MatchString(name)
-	if !valid {
+	if !isValidName(name) {
 		return fmt.Errorf("invalid socket name: %q", name)
 	}
 	return nil
@@ -294,6 +314,11 @@ func Validate(info *Info) error {
 		if info.Base != "" {
 			return fmt.Errorf(`cannot have "base" field on %q snap %q`, info.Type, info.Name())
 		}
+	}
+
+	// ensure that common-id(s) are unique
+	if err := ValidateCommonIDs(info); err != nil {
+		return err
 	}
 
 	return ValidateLayoutAll(info)
@@ -456,6 +481,23 @@ func validateAppOrderNames(app *AppInfo, dependencies []string) error {
 	return nil
 }
 
+func validateAppWatchdog(app *AppInfo) error {
+	if app.WatchdogTimeout == 0 {
+		// no watchdog
+		return nil
+	}
+
+	if !app.IsService() {
+		return fmt.Errorf("cannot define watchdog-timeout in application %q as it's not a service", app.Name)
+	}
+
+	if app.WatchdogTimeout < 0 {
+		return fmt.Errorf("cannot use a negative watchdog-timeout in application %q", app.Name)
+	}
+
+	return nil
+}
+
 func validateAppTimer(app *AppInfo) error {
 	if app.Timer == nil {
 		return nil
@@ -534,11 +576,15 @@ func ValidateApp(app *AppInfo) error {
 		return err
 	}
 
+	if err := validateAppWatchdog(app); err != nil {
+		return err
+	}
+
 	// validate stop-mode
 	if err := app.StopMode.Validate(); err != nil {
 		return err
 	}
-	// validate stop-mode
+	// validate refresh-mode
 	switch app.RefreshMode {
 	case "", "endure", "restart":
 		// valid
@@ -737,6 +783,20 @@ func ValidateLayout(layout *Layout, constraints []LayoutConstraint) error {
 
 	if layout.Mode&01777 != layout.Mode {
 		return fmt.Errorf("layout %q uses invalid mode %#o", layout.Path, layout.Mode)
+	}
+	return nil
+}
+
+func ValidateCommonIDs(info *Info) error {
+	seen := make(map[string]string, len(info.Apps))
+	for _, app := range info.Apps {
+		if app.CommonID != "" {
+			if other, was := seen[app.CommonID]; was {
+				return fmt.Errorf("application %q common-id %q must be unique, already used by application %q",
+					app.Name, app.CommonID, other)
+			}
+			seen[app.CommonID] = app.Name
+		}
 	}
 	return nil
 }

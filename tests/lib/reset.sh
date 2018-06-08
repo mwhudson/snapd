@@ -4,14 +4,32 @@ set -e -x
 
 # shellcheck source=tests/lib/dirs.sh
 . "$TESTSLIB/dirs.sh"
+# shellcheck source=tests/lib/state.sh
+. "$TESTSLIB/state.sh"
+
 
 # shellcheck source=tests/lib/systemd.sh
 . "$TESTSLIB/systemd.sh"
+
+#shellcheck source=tests/lib/systems.sh
+. "$TESTSLIB"/systems.sh
 
 reset_classic() {
     # Reload all service units as in some situations the unit might
     # have changed on the disk.
     systemctl daemon-reload
+
+    echo "Ensure the service is active before stopping it"
+    retries=20
+    systemctl status snapd.service snapd.socket || true
+    while systemctl status snapd.service snapd.socket | grep "Active: activating"; do
+        if [ $retries -eq 0 ]; then
+            echo "snapd service or socket not active"
+            exit 1
+        fi
+        retries=$(( retries - 1 ))
+        sleep 1
+    done
 
     systemd_stop_units snapd.service snapd.socket
 
@@ -19,7 +37,7 @@ reset_classic() {
         ubuntu-*|debian-*)
             sh -x "${SPREAD_PATH}/debian/snapd.postrm" purge
             ;;
-        fedora-*|opensuse-*)
+        fedora-*|opensuse-*|arch-*)
             # We don't know if snap-mgmt was built, so call the *.in file
             # directly and pass arguments that will override the placeholders
             sh -x "${SPREAD_PATH}/cmd/snap-mgmt/snap-mgmt.sh.in" \
@@ -50,12 +68,8 @@ reset_classic() {
     rm -f /tmp/core* /tmp/ubuntu-core*
 
     if [ "$1" = "--reuse-core" ]; then
-        # Purge all the systemd service units config
-        rm -rf /etc/systemd/system/snapd.service.d
-        rm -rf /etc/systemd/system/snapd.socket.d
-
         # Restore snapd state and start systemd service units
-        tar -C/ -xf "$SPREAD_PATH/snapd-state.tar.gz"
+        restore_snapd_state
         escaped_snap_mount_dir="$(systemd-escape --path "$SNAP_MOUNT_DIR")"
         mounts="$(systemctl list-unit-files --full | grep "^$escaped_snap_mount_dir[-.].*\.mount" | cut -f1 -d ' ')"
         services="$(systemctl list-unit-files --full | grep "^$escaped_snap_mount_dir[-.].*\.service" | cut -f1 -d ' ')"
@@ -66,7 +80,7 @@ reset_classic() {
 
         # force all profiles to be re-generated
         rm -f /var/lib/snapd/system-key
-     fi
+    fi
 
     if [ "$1" != "--keep-stopped" ]; then
         systemctl start snapd.socket
@@ -84,7 +98,6 @@ reset_all_snap() {
     # remove all leftover snaps
     # shellcheck source=tests/lib/names.sh
     . "$TESTSLIB/names.sh"
-
     for snap in "$SNAP_MOUNT_DIR"/*; do
         snap="${snap:6}"
         case "$snap" in
@@ -95,22 +108,23 @@ reset_all_snap() {
                 if ! systemctl status snapd.service snapd.socket; then
                     systemctl start snapd.service snapd.socket
                 fi
-                snap remove "$snap"
+                if ! echo "$SKIP_REMOVE_SNAPS" | grep -w "$snap"; then
+                    snap remove "$snap"
+                fi
                 ;;
         esac
     done
 
     # ensure we have the same state as initially
     systemctl stop snapd.service snapd.socket
-    rm -rf /var/lib/snapd/*
-    tar -C/ -xf "$SPREAD_PATH/snapd-state.tar.gz"
+    restore_snapd_state
     rm -rf /root/.snap
     if [ "$1" != "--keep-stopped" ]; then
         systemctl start snapd.service snapd.socket
     fi
 }
 
-if [[ "$SPREAD_SYSTEM" == ubuntu-core-16-* ]]; then
+if is_core_system; then
     reset_all_snap "$@"
 else
     reset_classic "$@"

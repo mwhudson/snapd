@@ -42,7 +42,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -58,10 +57,12 @@ import (
 
 var (
 	procSelfExe           = "/proc/self/exe"
+	isHomeUsingNFS        = osutil.IsHomeUsingNFS
 	isRootWritableOverlay = osutil.IsRootWritableOverlay
+	kernelFeatures        = release.AppArmorFeatures
 )
 
-// Backend is responsible for maintaining apparmor profiles for ubuntu-core-launcher.
+// Backend is responsible for maintaining apparmor profiles for snaps and parts of snapd.
 type Backend struct{}
 
 // Name returns the name of the backend.
@@ -100,7 +101,7 @@ func (b *Backend) Initialize() error {
 	// Check if NFS is mounted at or under $HOME. Because NFS is not
 	// transparent to apparmor we must alter our profile to counter that and
 	// allow snap-confine to work.
-	if nfs, err := osutil.IsHomeUsingNFS(); err != nil {
+	if nfs, err := isHomeUsingNFS(); err != nil {
 		logger.Noticef("cannot determine if NFS is in use: %v", err)
 	} else if nfs {
 		policy["nfs-support"] = &osutil.FileState{
@@ -164,18 +165,12 @@ func (b *Backend) Initialize() error {
 	}
 
 	// We are not using apparmor.LoadProfile() because it uses other cache.
-	cmd := exec.Command("apparmor_parser", "--replace",
-		// Use no-expr-simplify since expr-simplify is actually slower on armhf (LP: #1383858)
-		"-O", "no-expr-simplify",
-		"--write-cache", "--cache-loc", dirs.SystemApparmorCacheDir,
-		profilePath)
-
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if err := loadProfile(profilePath, dirs.SystemApparmorCacheDir); err != nil {
 		// When we cannot reload the profile then let's remove the generated
 		// policy. Maybe we have caused the problem so it's better to let other
 		// things work.
 		osutil.EnsureDirState(dirs.SnapConfineAppArmorDir, glob, nil)
-		return fmt.Errorf("cannot reload snap-confine apparmor profile: %v", osutil.OutputErr(output, err))
+		return fmt.Errorf("cannot reload snap-confine apparmor profile: %v", err)
 	}
 	return nil
 }
@@ -287,13 +282,8 @@ func (b *Backend) Setup(snapInfo *snap.Info, opts interfaces.ConfinementOptions,
 		return fmt.Errorf("cannot obtain apparmor specification for snap %q: %s", snapName, err)
 	}
 
-	// Set the snapName for AddUpdateNS snippet.
-	//
-	// TODO: remove this along with Specification.snapName as it is not really
-	// needed in practice and the corresponding code can be simplified away.
-	spec.(*Specification).snapName = snapName
+	// Add snippets derived from the layout definition.
 	spec.(*Specification).AddSnapLayout(snapInfo)
-	spec.(*Specification).snapName = ""
 
 	// core on classic is special
 	if snapName == "core" && release.OnClassic && release.AppArmorLevel() != release.NoAppArmor {
@@ -363,10 +353,10 @@ func (b *Backend) Remove(snapName string) error {
 
 var (
 	templatePattern = regexp.MustCompile("(###[A-Z_]+###)")
-	attachPattern   = regexp.MustCompile(`\(attach_disconnected\)`)
+	attachPattern   = regexp.MustCompile(`\(attach_disconnected,mediate_deleted\)`)
 )
 
-const attachComplain = "(attach_disconnected,complain)"
+const attachComplain = "(attach_disconnected,mediate_deleted,complain)"
 
 func (b *Backend) deriveContent(spec *Specification, snapInfo *snap.Info, opts interfaces.ConfinementOptions) (content map[string]*osutil.FileState, err error) {
 	content = make(map[string]*osutil.FileState, len(snapInfo.Apps)+len(snapInfo.Hooks)+1)
@@ -385,7 +375,7 @@ func (b *Backend) deriveContent(spec *Specification, snapInfo *snap.Info, opts i
 	// If we have neither then we don't have any need to create an executing environment.
 	// This applies to, for example, kernel snaps or gadget snaps (unless they have hooks).
 	if len(content) > 0 {
-		snippets := strings.Join(spec.UpdateNS()[snapInfo.Name()], "\n")
+		snippets := strings.Join(spec.UpdateNS(), "\n")
 		addUpdateNSProfile(snapInfo, opts, snippets, content)
 	}
 
@@ -453,7 +443,7 @@ func addContent(securityTag string, snapInfo *snap.Info, opts interfaces.Confine
 				// transparent to apparmor we must alter the profile to counter that and
 				// allow access to SNAP_USER_* files.
 				tagSnippets = snippetForTag
-				if nfs, _ := osutil.IsHomeUsingNFS(); nfs {
+				if nfs, _ := isHomeUsingNFS(); nfs {
 					tagSnippets += nfsSnippet
 				}
 
@@ -495,4 +485,16 @@ func unloadProfiles(profiles []string, cacheDir string) error {
 // NewSpecification returns a new, empty apparmor specification.
 func (b *Backend) NewSpecification() interfaces.Specification {
 	return &Specification{}
+}
+
+// SandboxFeatures returns the list of apparmor features supported by the kernel.
+func (b *Backend) SandboxFeatures() []string {
+	features := kernelFeatures()
+	tags := make([]string, 0, len(features))
+	for _, feature := range features {
+		// Prepend "kernel:" to apparmor kernel features to namespace them and
+		// allow us to introduce our own tags later.
+		tags = append(tags, "kernel:"+feature)
+	}
+	return tags
 }

@@ -74,6 +74,8 @@ func (s *ValidateSuite) TestValidateName(c *C) {
 		"a-a", "aa-a", "a-aa", "a-b-c",
 		"a0", "a-0", "a-0a",
 		"01game", "1-or-2",
+		// a regexp stresser
+		"u-94903713687486543234157734673284536758",
 	}
 	for _, name := range validNames {
 		err := ValidateName(name)
@@ -82,6 +84,14 @@ func (s *ValidateSuite) TestValidateName(c *C) {
 	invalidNames := []string{
 		// name cannot be empty
 		"",
+		// names cannot be too long
+		"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"xxxxxxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxx",
+		"1111111111111111111111111111111111111111x",
+		"x1111111111111111111111111111111111111111",
+		"x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x",
+		// a regexp stresser
+		"u-9490371368748654323415773467328453675-",
 		// dashes alone are not a name
 		"-", "--",
 		// double dashes in a name are not allowed
@@ -418,7 +428,7 @@ func (s *ValidateSuite) TestAppDaemonValue(c *C) {
 func (s *ValidateSuite) TestAppStopMode(c *C) {
 	// check services
 	for _, t := range []struct {
-		stopMode string
+		stopMode StopModeType
 		ok       bool
 	}{
 		// good
@@ -435,9 +445,9 @@ func (s *ValidateSuite) TestAppStopMode(c *C) {
 		{"invalid-thing", false},
 	} {
 		if t.ok {
-			c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "simple", StopMode: StopModeType(t.stopMode)}), IsNil)
+			c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "simple", StopMode: t.stopMode}), IsNil)
 		} else {
-			c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "simple", StopMode: StopModeType(t.stopMode)}), ErrorMatches, fmt.Sprintf(`"stop-mode" field contains invalid value %q`, t.stopMode))
+			c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "simple", StopMode: t.stopMode}), ErrorMatches, fmt.Sprintf(`"stop-mode" field contains invalid value %q`, t.stopMode))
 		}
 	}
 
@@ -1133,6 +1143,61 @@ apps:
 	}
 }
 
+func (s *ValidateSuite) TestValidateAppWatchdog(c *C) {
+	meta := []byte(`
+name: foo
+version: 1.0
+`)
+	fooAllGood := []byte(`
+apps:
+  foo:
+    daemon: simple
+    watchdog-timeout: 12s
+`)
+	fooNotADaemon := []byte(`
+apps:
+  foo:
+    watchdog-timeout: 12s
+`)
+
+	fooNegative := []byte(`
+apps:
+  foo:
+    daemon: simple
+    watchdog-timeout: -12s
+`)
+
+	tcs := []struct {
+		name string
+		desc []byte
+		err  string
+	}{{
+		name: "foo all good",
+		desc: fooAllGood,
+	}, {
+		name: "foo not a service",
+		desc: fooNotADaemon,
+		err:  `cannot define watchdog-timeout in application "foo" as it's not a service`,
+	}, {
+		name: "negative timeout",
+		desc: fooNegative,
+		err:  `cannot use a negative watchdog-timeout in application "foo"`,
+	}}
+	for _, tc := range tcs {
+		c.Logf("trying %q", tc.name)
+		info, err := InfoFromSnapYaml(append(meta, tc.desc...))
+		c.Assert(err, IsNil)
+		c.Assert(info, NotNil)
+
+		err = Validate(info)
+		if tc.err != "" {
+			c.Assert(err, ErrorMatches, tc.err)
+		} else {
+			c.Assert(err, IsNil)
+		}
+	}
+}
+
 func (s *YamlSuite) TestValidateAppTimer(c *C) {
 	meta := []byte(`
 name: foo
@@ -1208,4 +1273,46 @@ base: bar
 
 	err = Validate(info)
 	c.Check(err, ErrorMatches, `cannot have "base" field on "base" snap "foo"`)
+}
+
+func (s *ValidateSuite) TestValidateCommonIDs(c *C) {
+	meta := `
+name: foo
+version: 1.0
+`
+	good := meta + `
+apps:
+  foo:
+    common-id: org.foo.foo
+  bar:
+    common-id: org.foo.bar
+  baz:
+`
+	bad := meta + `
+apps:
+  foo:
+    common-id: org.foo.foo
+  bar:
+    common-id: org.foo.foo
+  baz:
+`
+	for i, tc := range []struct {
+		meta string
+		err  string
+	}{
+		{good, ""},
+		{bad, `application ("bar" common-id "org.foo.foo" must be unique, already used by application "foo"|"foo" common-id "org.foo.foo" must be unique, already used by application "bar")`},
+	} {
+		c.Logf("tc #%v", i)
+		info, err := InfoFromSnapYaml([]byte(tc.meta))
+		c.Assert(err, IsNil)
+
+		err = Validate(info)
+		if tc.err == "" {
+			c.Assert(err, IsNil)
+		} else {
+			c.Assert(err, NotNil)
+			c.Check(err, ErrorMatches, tc.err)
+		}
+	}
 }
