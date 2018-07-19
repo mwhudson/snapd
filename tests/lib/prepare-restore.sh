@@ -34,6 +34,9 @@ set -o pipefail
 # shellcheck source=tests/lib/state.sh
 . "$TESTSLIB/state.sh"
 
+# shellcheck source=tests/lib/systems.sh
+. "$TESTSLIB/systems.sh"
+
 
 ###
 ### Utility functions reused below.
@@ -96,7 +99,7 @@ build_rpm() {
 
     case "$SPREAD_SYSTEM" in
         fedora-*)
-            extra_tar_args="$extra_tar_args --exclude=vendor/"
+            extra_tar_args="$extra_tar_args --exclude='vendor/*'"
             ;;
         opensuse-*)
             archive_name=snapd_$version.vendor.tar.xz
@@ -114,7 +117,7 @@ build_rpm() {
     cp -ra -- * "/tmp/pkg/snapd-$version/"
     mkdir -p "$rpm_dir/SOURCES"
     # shellcheck disable=SC2086
-    (cd /tmp/pkg && tar "c${archive_compression}f" "$rpm_dir/SOURCES/$archive_name" "snapd-$version" $extra_tar_args)
+    (cd /tmp/pkg && tar "-c${archive_compression}f" "$rpm_dir/SOURCES/$archive_name" $extra_tar_args "snapd-$version")
     cp "$packaging_path"/* "$rpm_dir/SOURCES/"
 
     # Cleanup all artifacts from previous builds
@@ -235,6 +238,9 @@ prepare_project() {
         exit 1
     fi
 
+    # Prepare the state directories for execution
+    prepare_state
+
     # declare the "quiet" wrapper
 
     if [ "$SPREAD_BACKEND" = external ]; then
@@ -281,8 +287,10 @@ prepare_project() {
                 REBOOT
             fi
         fi
-        if [[ "$SPREAD_REBOOT" != 1 ]]; then
-            echo "reboot did not work"
+        # double check we are running the installed kernel
+        # NOTE: arch kernels use ARCH as local version, eg. 4.16.13-2-ARCH
+        if [[ "$(pacman -Qi linux | grep '^Version' | awk '{print $3}')" != "$(uname -r | sed -e 's/-ARCH//')" ]]; then
+            echo "running unexpected kernel version $(uname -r)"
             exit 1
         fi
     fi
@@ -377,12 +385,6 @@ EOF
 }
 
 prepare_project_each() {
-    # We want to rotate the logs so that when inspecting or dumping them we
-    # will just see logs since the test has started.
-
-    # Reset systemd journal cursor.
-    start_new_journalctl_log
-
     # Clear the kernel ring buffer.
     dmesg -c > /dev/null
 
@@ -392,23 +394,27 @@ prepare_project_each() {
 prepare_suite() {
     # shellcheck source=tests/lib/prepare.sh
     . "$TESTSLIB"/prepare.sh
-    if [[ "$SPREAD_SYSTEM" == ubuntu-core-16-* ]]; then
-        prepare_all_snap
+    if is_core_system; then
+        prepare_ubuntu_core
     else
         prepare_classic
     fi
 }
 
 prepare_suite_each() {
+    # save the job which is going to be exeuted in the system
+    echo -n "$SPREAD_JOB " >> "$RUNTIME_STATE_PATH/runs"
     # shellcheck source=tests/lib/reset.sh
     "$TESTSLIB"/reset.sh --reuse-core
+    # Reset systemd journal cursor.
+    start_new_journalctl_log
     # shellcheck source=tests/lib/prepare.sh
     . "$TESTSLIB"/prepare.sh
-    #shellcheck source=tests/lib/systems.sh
-    . "$TESTSLIB"/systems.sh
     if is_classic_system; then
         prepare_each_classic
     fi
+    # Check if journalctl is ready to run the test
+    check_journalctl_ready
 }
 
 restore_suite_each() {
@@ -418,8 +424,6 @@ restore_suite_each() {
 restore_suite() {
     # shellcheck source=tests/lib/reset.sh
     "$TESTSLIB"/reset.sh --store
-    #shellcheck source=tests/lib/systems.sh
-    . "$TESTSLIB"/systems.sh
     if is_classic_system; then
         # shellcheck source=tests/lib/pkgdb.sh
         . $TESTSLIB/pkgdb.sh

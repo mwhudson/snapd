@@ -369,7 +369,7 @@ static void sc_bootstrap_mount_namespace(const struct sc_mount_config *config)
 				 scratch_dir);
 
 		// bind mount the current $ROOT/usr/lib/snapd path,
-		// where $ROOT is either "/" or the "/snap/core/current"
+		// where $ROOT is either "/" or the "/snap/{core,snapd}/current"
 		// that we are re-execing from
 		char *src = NULL;
 		char self[PATH_MAX + 1] = { 0 };
@@ -757,7 +757,7 @@ static void sc_make_slave_mount_ns(void)
 }
 
 void sc_setup_user_mounts(struct sc_apparmor *apparmor, int snap_update_ns_fd,
-                          const char *snap_name)
+			  const char *snap_name)
 {
 	debug("%s: %s", __FUNCTION__, snap_name);
 
