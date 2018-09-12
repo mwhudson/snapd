@@ -67,7 +67,7 @@ capability sys_admin,
 
 # For {mbim,qmi}-proxy
 unix (bind, listen) type=stream addr="@{mbim,qmi}-proxy",
-/sys/devices/**/usb**/descriptors r,
+/sys/devices/**/usb**/{descriptors,manufacturer,product} r,
 # See https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-net-qmi
 /sys/devices/**/net/*/qmi/* rw,
 
@@ -1249,7 +1249,7 @@ func (iface *modemManagerInterface) DBusPermanentSlot(spec *dbus.Specification, 
 
 func (iface *modemManagerInterface) UDevPermanentSlot(spec *udev.Specification, slot *snap.SlotInfo) error {
 	spec.AddSnippet(modemManagerPermanentSlotUDev)
-	spec.TagDevice(`KERNEL=="tty[A-Z]*[0-9]*|cdc-wdm[0-9]*"`)
+	spec.TagDevice(`KERNEL=="tty[a-zA-Z]*[0-9]*|cdc-wdm[0-9]*"`)
 	return nil
 }
 

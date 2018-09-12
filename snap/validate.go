@@ -68,7 +68,7 @@ func isValidName(name string) bool {
 	return true
 }
 
-// ValidateName checks if a string can be used as a snap instance name.
+// ValidateInstanceName checks if a string can be used as a snap instance name.
 func ValidateInstanceName(instanceName string) error {
 	// NOTE: This function should be synchronized with the two other
 	// implementations: sc_instance_name_validate and validate_instance_name .
@@ -97,6 +97,41 @@ func ValidateName(name string) error {
 	// implementations: sc_snap_name_validate and validate_snap_name .
 	if len(name) > 40 || !isValidName(name) {
 		return fmt.Errorf("invalid snap name: %q", name)
+	}
+	return nil
+}
+
+// Regular expression describing correct plug, slot and interface names.
+var validPlugSlotIfaceName = regexp.MustCompile("^[a-z](?:-?[a-z0-9])*$")
+
+// ValidatePlugName checks if a string can be used as a slot name.
+//
+// Slot names and plug names within one snap must have unique names.
+// This is not enforced by this function but is enforced by snap-level
+// validation.
+func ValidatePlugName(name string) error {
+	if !validPlugSlotIfaceName.MatchString(name) {
+		return fmt.Errorf("invalid plug name: %q", name)
+	}
+	return nil
+}
+
+// ValidateSlotName checks if a string can be used as a slot name.
+//
+// Slot names and plug names within one snap must have unique names.
+// This is not enforced by this function but is enforced by snap-level
+// validation.
+func ValidateSlotName(name string) error {
+	if !validPlugSlotIfaceName.MatchString(name) {
+		return fmt.Errorf("invalid slot name: %q", name)
+	}
+	return nil
+}
+
+// ValidateInterfaceName checks if a string can be used as an interface name.
+func ValidateInterfaceName(name string) error {
+	if !validPlugSlotIfaceName.MatchString(name) {
+		return fmt.Errorf("invalid interface name: %q", name)
 	}
 	return nil
 }
@@ -290,8 +325,10 @@ func Validate(info *Info) error {
 		return fmt.Errorf("snap name cannot be empty")
 	}
 
-	// TODO parallel-install: use of proper instance/store name, validate instance key
-	if err := ValidateName(name); err != nil {
+	if err := ValidateName(info.SnapName()); err != nil {
+		return err
+	}
+	if err := ValidateInstanceName(name); err != nil {
 		return err
 	}
 

@@ -2,20 +2,26 @@ summary: Ensure that the contacts-service interface works
 
 # Only test on classic systems.  Don't test on Ubuntu 14.04, which
 # does not ship a new enough evolution-data-server.
+# amazon: no need to run this on amazon
 systems:
     - -ubuntu-core-*
     - -ubuntu-14.04-*
+    - -amazon-*
+
+# fails in autopkgtest environment with:
+# [Wed Aug 15 16:08:23 2018] audit: type=1400
+# audit(1534349304.173:1681): apparmor="DENIED" operation="connect"
+# profile="snap.test-snapd-eds.contacts" pid=18321 comm="contacts"
+# family="unix" sock_type="stream" protocol=0 requested_mask="send
+# receive connect" denied_mask="send connect" addr=none
+# peer_addr="@/tmp/dbus-GZTRALrYYm" peer="unconfined"
+backends: [-autopkgtest]
 
 environment:
     XDG: $(pwd)/xdg
     XDG_CONFIG_HOME: $XDG/config
     XDG_DATA_HOME: $XDG/share
     XDG_CACHE_HOME: $XDG/cache
-
-prepare: |
-    #shellcheck source=tests/lib/pkgdb.sh
-    . "$TESTSLIB/pkgdb.sh"
-    distro_install_package evolution-data-server
 
 restore: |
     if [ -e dbus-launch.pid ]; then
@@ -47,7 +53,7 @@ execute: |
     echo "$DBUS_SESSION_BUS_PID" > dbus-launch.pid
 
     echo "The interface is initially disconnected"
-    snap interfaces -i contacts-service | MATCH "\- +test-snapd-eds:contacts-service"
+    snap interfaces -i contacts-service | MATCH -- '- +test-snapd-eds:contacts-service'
     if [ "$(snap debug confinement)" = strict ]; then
       ! test-snapd-eds.contacts list test-address-book
     fi

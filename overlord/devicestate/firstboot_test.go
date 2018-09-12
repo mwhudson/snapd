@@ -52,6 +52,7 @@ import (
 	"github.com/snapcore/snapd/release"
 	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/snap/snaptest"
+	"github.com/snapcore/snapd/systemd"
 	"github.com/snapcore/snapd/testutil"
 )
 
@@ -319,6 +320,12 @@ func (s *FirstBootTestSuite) makeAssertedSnap(c *C, snapYaml string, files [][]s
 	c.Assert(err, IsNil)
 
 	snapID := (snapName + "-snap-" + strings.Repeat("id", 20))[:32]
+	// FIXME: snapd is special in the interface policy code and it
+	//        identified by its snap-id. so we fake the real snap-id
+	//        here. Instead we should add a "type: snapd" for snaps.
+	if snapName == "snapd" {
+		snapID = "PMrrV4ml8uWuEUDBT8dSGnKUYbevVhc4"
+	}
 
 	declA, err := s.storeSigning.Sign(asserts.SnapDeclarationType, map[string]interface{}{
 		"series":       "16",
@@ -595,26 +602,27 @@ func (s *FirstBootTestSuite) TestPopulateFromSeedMissingBootloader(c *C) {
 	// situation
 	o := overlord.Mock()
 	st := o.State()
-	snapmgr, err := snapstate.Manager(st)
+	snapmgr, err := snapstate.Manager(st, o.TaskRunner())
 	c.Assert(err, IsNil)
 	o.AddManager(snapmgr)
 
-	ifacemgr, err := ifacestate.Manager(st, nil, nil, nil)
+	ifacemgr, err := ifacestate.Manager(st, nil, o.TaskRunner(), nil, nil)
 	c.Assert(err, IsNil)
 	o.AddManager(ifacemgr)
 	st.Lock()
 	assertstate.ReplaceDB(st, db.(*asserts.Database))
 	st.Unlock()
 
+	o.AddManager(o.TaskRunner())
+
 	chg := s.makeBecomeOperationalChange(c, st)
 
+	se := o.StateEngine()
 	// we cannot use Settle because the Change will not become Clean
 	// under the subset of managers
 	for i := 0; i < 25 && !chg.IsReady(); i++ {
-		snapmgr.Ensure()
-		ifacemgr.Ensure()
-		snapmgr.Wait()
-		ifacemgr.Wait()
+		se.Ensure()
+		se.Wait()
 	}
 
 	st.Lock()
@@ -1264,6 +1272,13 @@ version: 1.0
 }
 
 func (s *FirstBootTestSuite) TestPopulateFromSeedWithBaseHappy(c *C) {
+	var sysdLog [][]string
+	systemctlRestorer := systemd.MockSystemctl(func(cmd ...string) ([]byte, error) {
+		sysdLog = append(sysdLog, cmd)
+		return []byte("ActiveState=inactive\n"), nil
+	})
+	defer systemctlRestorer()
+
 	bootloader := boottest.NewMockBootloader("mock", c.MkDir())
 	partition.ForceBootloader(bootloader)
 	defer partition.ForceBootloader(nil)
@@ -1386,6 +1401,9 @@ snaps:
 		c.Assert(snapst.Required, Equals, true, Commentf("required not set for %v", reqName))
 	}
 
+	// the right systemd commands were run
+	c.Check(sysdLog, testutil.DeepContains, []string{"start", "usr-lib-snapd.mount"})
+
 	// and ensure state is now considered seeded
 	var seeded bool
 	err = state.Get("seeded", &seeded)
@@ -1397,4 +1415,103 @@ snaps:
 	err = state.Get("seed-time", &seedTime)
 	c.Assert(err, IsNil)
 	c.Check(seedTime.IsZero(), Equals, false)
+}
+
+func (s *FirstBootTestSuite) TestPopulateFromSeedWrongContentProviderOrder(c *C) {
+	bootloader := boottest.NewMockBootloader("mock", c.MkDir())
+	partition.ForceBootloader(bootloader)
+	defer partition.ForceBootloader(nil)
+	bootloader.SetBootVars(map[string]string{
+		"snap_core":   "core_1.snap",
+		"snap_kernel": "pc-kernel_1.snap",
+	})
+
+	coreFname, kernelFname, gadgetFname := s.makeCoreSnaps(c, "")
+
+	devAcct := assertstest.NewAccount(s.storeSigning, "developer", map[string]interface{}{
+		"account-id": "developerid",
+	}, "")
+
+	// a snap that uses content providers
+	snapYaml := `name: gnome-calculator
+version: 1.0
+plugs:
+ gtk-3-themes:
+  interface: content
+  default-provider: gtk-common-themes
+  target: $SNAP/data-dir/themes
+`
+	calcFname, calcDecl, calcRev := s.makeAssertedSnap(c, snapYaml, nil, snap.R(128), "developerid")
+
+	writeAssertionsToFile("calc.asserts", []asserts.Assertion{devAcct, calcRev, calcDecl})
+
+	// put a 2nd firstboot snap into the SnapBlobDir
+	snapYaml = `name: gtk-common-themes
+version: 1.0
+slots:
+ gtk-3-themes:
+  interface: content
+  source:
+   read:
+    - $SNAP/share/themes/Adawaita
+`
+	themesFname, themesDecl, themesRev := s.makeAssertedSnap(c, snapYaml, nil, snap.R(65), "developerid")
+
+	writeAssertionsToFile("themes.asserts", []asserts.Assertion{devAcct, themesDecl, themesRev})
+
+	// add a model assertion and its chain
+	assertsChain := s.makeModelAssertionChain(c, "my-model", nil)
+	writeAssertionsToFile("model.asserts", assertsChain)
+
+	// create a seed.yaml
+	content := []byte(fmt.Sprintf(`
+snaps:
+ - name: core
+   file: %s
+ - name: pc-kernel
+   file: %s
+ - name: pc
+   file: %s
+ - name: gnome-calculator
+   file: %s
+ - name: gtk-common-themes
+   file: %s
+`, coreFname, kernelFname, gadgetFname, calcFname, themesFname))
+	err := ioutil.WriteFile(filepath.Join(dirs.SnapSeedDir, "seed.yaml"), content, 0644)
+	c.Assert(err, IsNil)
+
+	// run the firstboot stuff
+	st := s.overlord.State()
+	st.Lock()
+	defer st.Unlock()
+
+	tsAll, err := devicestate.PopulateStateFromSeedImpl(st)
+	c.Assert(err, IsNil)
+	// use the expected kind otherwise settle with start another one
+	chg := st.NewChange("seed", "run the populate from seed changes")
+	for _, ts := range tsAll {
+		chg.AddAll(ts)
+	}
+	c.Assert(st.Changes(), HasLen, 1)
+
+	// avoid device reg
+	chg1 := st.NewChange("become-operational", "init device")
+	chg1.SetStatus(state.DoingStatus)
+
+	st.Unlock()
+	err = s.overlord.Settle(settleTimeout)
+	st.Lock()
+
+	c.Assert(chg.Err(), IsNil)
+	c.Assert(err, IsNil)
+
+	// verify the result
+	var conns map[string]interface{}
+	err = st.Get("conns", &conns)
+	c.Assert(err, IsNil)
+	c.Check(conns, HasLen, 1)
+	conn, hasConn := conns["gnome-calculator:gtk-3-themes gtk-common-themes:gtk-3-themes"]
+	c.Check(hasConn, Equals, true)
+	c.Check(conn.(map[string]interface{})["auto"], Equals, true)
+	c.Check(conn.(map[string]interface{})["interface"], Equals, "content")
 }
