@@ -92,7 +92,7 @@
 %endif
 
 Name:           snapd
-Version:        2.37.1
+Version:        2.37.4
 Release:        0%{?dist}
 Summary:        A transactional software package manager
 Group:          System Environment/Base
@@ -828,6 +828,47 @@ fi
 %endif
 
 %changelog
+* Wed Feb 27 2019 Michael Vogt <mvo@ubuntu.com>
+ - squashfs: unset SOURCE_DATE_EPOCH in the TestBuildDate test
+ - overlord/ifacestate: fix migration of connections on upgrade from
+   ubuntu-core
+ - tests: fix upgrade-from-2.15 with kernel 4.15
+ - interfaces/seccomp: increase filter precision
+ - tests: remove snapweb from tests
+
+* Mon Feb 18 2019 Michael Vogt <mvo@ubuntu.com>
+- New upstream release 2.37.3
+ - interfaces/seccomp: generate global seccomp profile
+ - overlord/snapstate: add some randomness to the catalog refresh
+ - tests: add upgrade test from 2.15.2ubuntu1 -> current snapd
+ - snap-confine: fix fallback to ubuntu-core
+ - packaging: avoid race in snapd.postinst
+ - overlord/snapstate: discard mount namespace when undoing 1st link
+   snap
+ - cmd/snap-confine: allow writes to /var/lib/** again
+ - tests: stop catalog-update/apt-hooks test until the catlog refresh
+   is randomized
+ - debian: ensure leftover usr.lib.snapd.snap-confine is gone
+
+* Wed Feb 06 2019 Michael Vogt <mvo@ubuntu.com>
+- New upstream release 2.37.2
+ - cmd/snap, overlord/snapstate: silently ignore classic flag when a
+   snap is strictly confined
+ - snap-confine: remove special handling of /var/lib/jenkins
+ - cmd/snap-confine: handle death of helper process gracefully
+ - snap-confine: fix classic snaps for users with /var/lib/* homedirs
+   like jenkins/postgres
+ - packaging: disable systemd environment generator on 18.04
+ - tests: update smoke/sandbox test for armhf
+ - cmd/snap-confine: refactor and cleanup of seccomp loading
+ - snap-confine: increase locking timeout to 30s
+ - snap-confine: fix incorrect "sanity timeout 3s" message
+ - snap: fix hook autodiscovery for parallel installed snaps
+ - tests: iterate getting journal logs to support delay on boards on
+   daemon-notify test
+ - interfaces/apparmor: deny inet/inet6 in snap-update-ns profile
+ - interfaces: add u2f-devices interface
+
 * Tue Jan 29 2019 Michael Vogt <mvo@ubuntu.com>
 - New upstream release 2.37.1
  - cmd/snap-confine: add special case for Jenkins
