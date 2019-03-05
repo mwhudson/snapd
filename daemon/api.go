@@ -2094,8 +2094,35 @@ func getChange(c *Command, r *http.Request, user *auth.UserState) Response {
 	if chg == nil {
 		return NotFound("cannot find change with id %q", chID)
 	}
+	d := "/run/snapd-change-log/" + chID
+	os.MkdirAll(d, 0755)
+	i := 0
+	p := ""
+	for {
+		p = fmt.Sprintf("%s/%04d.json", d, i)
+		logger.Noticef("Trying path %s", p)
+		if _, err := os.Stat(p); err != nil {
+			break
+		}
+		i += 1
+	}
+	logger.Noticef("Using path %s", p)
+	ch := change2changeInfo(chg)
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		logger.Noticef("open failed %s", err)
+	}
+	e := json.NewEncoder(f)
+	err = e.Encode(ch)
+	if err != nil {
+		logger.Noticef("encode failed %s", err)
+	}
+	err = f.Close()
+	if err != nil {
+		logger.Noticef("close failed %s", err)
+	}
 
-	return SyncResponse(change2changeInfo(chg), nil)
+	return SyncResponse(ch, nil)
 }
 
 func getChanges(c *Command, r *http.Request, user *auth.UserState) Response {

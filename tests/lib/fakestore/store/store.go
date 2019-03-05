@@ -94,6 +94,8 @@ func NewStore(topDir, addr string, assertFallback bool) *Store {
 	}
 
 	mux.HandleFunc("/", rootEndpoint)
+	mux.HandleFunc("/api/v1/snaps/auth/nonces", store.nonceEndpoint)
+	mux.HandleFunc("/api/v1/snaps/auth/sessions", store.sessionsEndpoint)
 	mux.HandleFunc("/api/v1/snaps/search", store.searchEndpoint)
 	mux.HandleFunc("/api/v1/snaps/details/", store.detailsEndpoint)
 	mux.HandleFunc("/api/v1/snaps/metadata", store.bulkEndpoint)
@@ -255,6 +257,16 @@ type detailsReplyJSON struct {
 func (s *Store) searchEndpoint(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(501)
 	fmt.Fprintf(w, "search not implemented")
+}
+
+func (s *Store) nonceEndpoint(w http.ResponseWriter, req *http.Request) {
+	w.WriteHeader(200)
+	fmt.Fprintf(w, "{\"nonce\":\"46794984377410583171551391920:1551391920\"}")
+}
+
+func (s *Store) sessionsEndpoint(w http.ResponseWriter, req *http.Request) {
+	w.WriteHeader(200)
+	fmt.Fprintf(w, "{\"macaroon\":\"46794984377410583171551391920:1551391920\"}")
 }
 
 func (s *Store) detailsEndpoint(w http.ResponseWriter, req *http.Request) {

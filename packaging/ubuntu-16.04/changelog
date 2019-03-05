@@ -1,4 +1,4 @@
-snapd (2.37.4+19.04) disco; urgency=medium
+snapd (2.37.4+19.04+testkeys1) disco; urgency=medium
 
   * New upstream release, LP: #1817949
     - squashfs: unset SOURCE_DATE_EPOCH in the TestBuildDate test
