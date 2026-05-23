@@ -61,6 +61,18 @@ type CoreOptions struct {
 	SysfsOverlay string
 }
 
+// ClassicOptions provides optional options for classic and hybrid preseeding.
+type ClassicOptions struct {
+	// optional path to AppArmor kernel features directory; when set, it
+	// is bind-mounted on top of /sys/kernel/security/apparmor/features in
+	// the preseeded chroot.
+	AppArmorKernelFeaturesDir string
+	// optional sysfs overlay; when set, permitted subdirectories of its
+	// sys/ tree are bind-mounted on top of the corresponding paths in the
+	// preseeded chroot.
+	SysfsOverlay string
+}
+
 // preseedCoreOptions holds internal preseeding options for the core case
 type preseedCoreOptions struct {
 	// input options

@@ -27,6 +27,7 @@ import (
 
 	"github.com/snapcore/snapd/cmd/snap-preseed"
 	"github.com/snapcore/snapd/dirs"
+	"github.com/snapcore/snapd/image/preseed"
 	"github.com/snapcore/snapd/osutil/squashfs"
 	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/testutil"
@@ -93,8 +94,11 @@ func (s *startPreseedSuite) TestRunPreseedClassicHappy(c *C) {
 	defer restore()
 
 	var called bool
-	restorePreseed := main.MockPreseedClassic(func(dir string) error {
+	restorePreseed := main.MockPreseedClassic(func(dir string, opts *preseed.ClassicOptions) error {
 		c.Check(dir, Equals, "/a/dir")
+		c.Assert(opts, NotNil)
+		c.Check(opts.AppArmorKernelFeaturesDir, Equals, "")
+		c.Check(opts.SysfsOverlay, Equals, "")
 		called = true
 		return nil
 	})
@@ -102,6 +106,28 @@ func (s *startPreseedSuite) TestRunPreseedClassicHappy(c *C) {
 
 	parser := testParser(c)
 	c.Assert(main.Run(parser, []string{"/a/dir"}), IsNil)
+	c.Check(called, Equals, true)
+}
+
+func (s *startPreseedSuite) TestRunPreseedClassicWithOverlays(c *C) {
+	restore := main.MockOsGetuid(func() int {
+		return 0
+	})
+	defer restore()
+
+	var called bool
+	restorePreseed := main.MockPreseedClassic(func(dir string, opts *preseed.ClassicOptions) error {
+		c.Check(dir, Equals, "/a/dir")
+		c.Assert(opts, NotNil)
+		c.Check(opts.AppArmorKernelFeaturesDir, Equals, "/custom/aa/features")
+		c.Check(opts.SysfsOverlay, Equals, "/sysfs-overlay")
+		called = true
+		return nil
+	})
+	defer restorePreseed()
+
+	parser := testParser(c)
+	c.Assert(main.Run(parser, []string{"--apparmor-features-dir", "/custom/aa/features", "--sysfs-overlay", "/sysfs-overlay", "/a/dir"}), IsNil)
 	c.Check(called, Equals, true)
 }
 
@@ -148,15 +174,40 @@ func (s *startPreseedSuite) TestHybridHappy(c *C) {
 	defer restore()
 
 	var called bool
-	main.MockPreseedHybrid(func(dir, label string) error {
+	main.MockPreseedHybrid(func(dir, label string, opts *preseed.ClassicOptions) error {
 		c.Check(dir, Equals, "/a/dir")
 		c.Check(label, Equals, "system-label")
+		c.Assert(opts, NotNil)
+		c.Check(opts.AppArmorKernelFeaturesDir, Equals, "")
+		c.Check(opts.SysfsOverlay, Equals, "")
 		called = true
 		return nil
 	})
 
 	parser := testParser(c)
 	c.Assert(main.Run(parser, []string{"--hybrid", "--system-label", "system-label", "/a/dir"}), IsNil)
+	c.Check(called, Equals, true)
+}
+
+func (s *startPreseedSuite) TestHybridWithOverlays(c *C) {
+	restore := main.MockOsGetuid(func() int {
+		return 0
+	})
+	defer restore()
+
+	var called bool
+	main.MockPreseedHybrid(func(dir, label string, opts *preseed.ClassicOptions) error {
+		c.Check(dir, Equals, "/a/dir")
+		c.Check(label, Equals, "system-label")
+		c.Assert(opts, NotNil)
+		c.Check(opts.AppArmorKernelFeaturesDir, Equals, "/custom/aa/features")
+		c.Check(opts.SysfsOverlay, Equals, "/sysfs-overlay")
+		called = true
+		return nil
+	})
+
+	parser := testParser(c)
+	c.Assert(main.Run(parser, []string{"--hybrid", "--system-label", "system-label", "--apparmor-features-dir", "/custom/aa/features", "--sysfs-overlay", "/sysfs-overlay", "/a/dir"}), IsNil)
 	c.Check(called, Equals, true)
 }
 

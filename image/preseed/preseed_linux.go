@@ -538,8 +538,85 @@ func getSnapdVersion(rootDir, label string) (string, error) {
 	return ver, nil
 }
 
-func prepareClassicChroot(preseedChroot string, reset bool, label string) (*targetSnapdInfo, func(), error) {
+// classicOverlayMounts performs the pre-chroot bind mounts for the optional
+// apparmor kernel features dir and the sysfs overlay (subdirectories
+// allow-listed by permitedSysfsOverlays). It returns the relative mount
+// destination paths (relative to preseedChroot) which the caller is responsible
+// for unmounting once we are inside the chroot. On error all already-performed
+// bind mounts are torn down using their host-view paths.
+func classicOverlayMounts(preseedChroot string, opts *ClassicOptions) (relMounts []string, err error) {
+	if opts == nil {
+		return nil, nil
+	}
+	if opts.AppArmorKernelFeaturesDir == "" && opts.SysfsOverlay == "" {
+		return nil, nil
+	}
+
+	// best-effort cleanup of already-performed mounts when an error occurs;
+	// uses host-view paths because we are still pre-chroot.
+	cleanupOnError := func() {
+		for i := len(relMounts) - 1; i >= 0; i-- {
+			cmd := exec.Command("umount", filepath.Join(preseedChroot, relMounts[i]))
+			if out, e := cmd.CombinedOutput(); e != nil {
+				fmt.Fprintf(Stdout, "cannot unmount %s: %s\noutput: %s\n",
+					filepath.Join(preseedChroot, relMounts[i]), e, out)
+			}
+		}
+	}
+
+	bindMount := func(src, relDst string) error {
+		dst := filepath.Join(preseedChroot, relDst)
+		cmd := exec.Command("mount", "--bind", src, dst)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("cannot bind-mount %s to %s in preseed mode: %v\n'mount --bind %s %s' failed with: %s", src, dst, err, src, dst, out)
+		}
+		relMounts = append(relMounts, relDst)
+		return nil
+	}
+
+	if opts.SysfsOverlay != "" {
+		for _, dir := range permitedSysfsOverlays {
+			src := filepath.Join(opts.SysfsOverlay, dir)
+			info, statErr := os.Stat(src)
+			if statErr != nil || !info.IsDir() {
+				continue
+			}
+			if err := bindMount(src, dir); err != nil {
+				cleanupOnError()
+				return nil, err
+			}
+		}
+	}
+
+	if opts.AppArmorKernelFeaturesDir != "" {
+		if err := bindMount(opts.AppArmorKernelFeaturesDir, "sys/kernel/security/apparmor/features"); err != nil {
+			cleanupOnError()
+			return nil, err
+		}
+	}
+
+	return relMounts, nil
+}
+
+func prepareClassicChroot(preseedChroot string, reset bool, label string, opts *ClassicOptions) (*targetSnapdInfo, func(), error) {
+	overlayMounts, err := classicOverlayMounts(preseedChroot, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cleanupOverlaysHost := func() {
+		// pre-chroot cleanup uses host-view paths
+		for i := len(overlayMounts) - 1; i >= 0; i-- {
+			cmd := exec.Command("umount", filepath.Join(preseedChroot, overlayMounts[i]))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				fmt.Fprintf(Stdout, "cannot unmount %s: %s\noutput: %s\n",
+					filepath.Join(preseedChroot, overlayMounts[i]), err, out)
+			}
+		}
+	}
+
 	if err := syscallChroot(preseedChroot); err != nil {
+		cleanupOverlaysHost()
 		return nil, nil, fmt.Errorf("cannot chroot into %s: %v", preseedChroot, err)
 	}
 
@@ -568,6 +645,20 @@ func prepareClassicChroot(preseedChroot string, reset bool, label string) (*targ
 	defer func() {
 		cleanup()
 	}()
+
+	// Register cleanup for the overlay bind mounts; from inside the chroot
+	// the mount points are reachable at rootDir/<rel>.
+	if len(overlayMounts) > 0 {
+		addCleanup(func() {
+			for i := len(overlayMounts) - 1; i >= 0; i-- {
+				cmd := exec.Command("umount", filepath.Join(rootDir, overlayMounts[i]))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					fmt.Fprintf(Stdout, "cannot unmount %s: %s\noutput: %s\n",
+						filepath.Join(rootDir, overlayMounts[i]), err, out)
+				}
+			}
+		})
+	}
 
 	// The best would have been to check if /proc is a mountpoint.
 	// But we would need /proc/self/mountinfo for that.
@@ -777,7 +868,7 @@ func Core20(opts *CoreOptions) error {
 	return runUC20PreseedMode(popts)
 }
 
-func classicLikePreseed(chrootDir, label string) error {
+func classicLikePreseed(chrootDir, label string, opts *ClassicOptions) error {
 	var err error
 	chrootDir, err = filepath.Abs(chrootDir)
 	if err != nil {
@@ -794,7 +885,7 @@ func classicLikePreseed(chrootDir, label string) error {
 	// runPreseedMode/runUC20PreseedMode function that handles both classic
 	// and core20.
 	const reset = false
-	targetSnapd, cleanup, err := prepareClassicChroot(chrootDir, reset, label)
+	targetSnapd, cleanup, err := prepareClassicChroot(chrootDir, reset, label, opts)
 	if err != nil {
 		return fmt.Errorf("cannot prepare chroot: %w", err)
 	}
@@ -806,15 +897,15 @@ func classicLikePreseed(chrootDir, label string) error {
 }
 
 // Classic runs preseeding of a classic ubuntu system pointed by chrootDir.
-func Classic(chrootDir string) error {
+func Classic(chrootDir string, opts *ClassicOptions) error {
 	const label = ""
-	return classicLikePreseed(chrootDir, label)
+	return classicLikePreseed(chrootDir, label, opts)
 }
 
 // Hybrid runs preseeding of a hybrid classic ubuntu system with core boot
 // components pointed by chrootDir and identified by a given system label.
-func Hybrid(chrootDir, label string) error {
-	return classicLikePreseed(chrootDir, label)
+func Hybrid(chrootDir, label string, opts *ClassicOptions) error {
+	return classicLikePreseed(chrootDir, label, opts)
 }
 
 func classicLikeReset(chrootDir, label string) error {
@@ -837,7 +928,7 @@ func classicLikeReset(chrootDir, label string) error {
 	}
 
 	const reset = true
-	targetSnapd, cleanup, err := prepareClassicChroot(chrootDir, reset, label)
+	targetSnapd, cleanup, err := prepareClassicChroot(chrootDir, reset, label, nil)
 	if err != nil {
 		return err
 	}

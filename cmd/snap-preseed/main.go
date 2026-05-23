@@ -131,6 +131,11 @@ func run(parser *flags.Parser, args []string) (err error) {
 		return fmt.Errorf("cannot use --system-label without --hybrid")
 	}
 
+	classicOpts := &preseed.ClassicOptions{
+		AppArmorKernelFeaturesDir: opts.AppArmorFeaturesDir,
+		SysfsOverlay:              opts.SysfsOverlay,
+	}
+
 	if opts.Hybrid {
 		if opts.SystemLabel == "" {
 			return fmt.Errorf("cannot use --hybrid without --system-label")
@@ -138,7 +143,7 @@ func run(parser *flags.Parser, args []string) (err error) {
 		if opts.Reset {
 			return preseedHybridReset(chrootDir, opts.SystemLabel)
 		}
-		return preseedHybrid(chrootDir, opts.SystemLabel)
+		return preseedHybrid(chrootDir, opts.SystemLabel, classicOpts)
 	}
 
 	if probeCore20ImageDir(chrootDir) {
@@ -160,5 +165,5 @@ func run(parser *flags.Parser, args []string) (err error) {
 	if opts.Reset {
 		return preseedClassicReset(chrootDir)
 	}
-	return preseedClassic(chrootDir)
+	return preseedClassic(chrootDir, classicOpts)
 }

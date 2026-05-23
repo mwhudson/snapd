@@ -26,10 +26,14 @@ import (
 
 var preseedNotAvailableError = errors.New("preseed mode not available for systems other than linux")
 
-func Classic(chrootDir string) error {
+func Classic(chrootDir string, opts *ClassicOptions) error {
 	return preseedNotAvailableError
 }
 
-func Core20(opts *CorePreseedOptions) error {
+func Hybrid(chrootDir, label string, opts *ClassicOptions) error {
+	return preseedNotAvailableError
+}
+
+func Core20(opts *CoreOptions) error {
 	return preseedNotAvailableError
 }
