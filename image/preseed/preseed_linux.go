@@ -185,6 +185,11 @@ const snapdPreseedResetReexec = `2.59`
 // over via SNAPD_PRESEED_APPARMOR_FEATURES_DIR while preseeding.
 const snapdPreseedAppArmorFeaturesVer = `2.79`
 
+// snapdPreseedSeccompActionsVer is the first snapd version understanding the
+// seccomp actions of the target kernel being handed over via
+// SNAPD_PRESEED_SECCOMP_ACTIONS while preseeding.
+const snapdPreseedSeccompActionsVer = `2.79`
+
 // chooseTargetSnapdVersion checks if the version of snapd under chroot env
 // is good enough for preseeding. It checks both the snapd from the deb
 // and from the seeded snap mounted under snapdMountPath and returns the
@@ -583,8 +588,7 @@ func copyAppArmorFeatures(src, dst string) (err error) {
 
 // prepareClassicChroot chroots into preseedChroot and prepares it for running
 // snapd in preseed mode. If aaFeaturesDir is set, it is copied into the chroot
-// at chrootAppArmorFeaturesDir, which requires the snapd to run to support
-// the SNAPD_PRESEED_APPARMOR_FEATURES_DIR environment variable.
+// at chrootAppArmorFeaturesDir.
 func prepareClassicChroot(preseedChroot string, reset bool, label string, aaFeaturesDir string) (*targetSnapdInfo, func(), error) {
 	// the AppArmor features directory is not reachable from inside the
 	// chroot, copy it there first
@@ -704,18 +708,6 @@ func prepareClassicChroot(preseedChroot string, reset bool, label string, aaFeat
 		return nil, nil, err
 	}
 
-	// the snapd to run must be new enough to receive the AppArmor kernel
-	// features of the target kernel via the environment
-	if aaFeaturesDir != "" {
-		res, err := strutil.VersionCompare(targetSnapd.version, snapdPreseedAppArmorFeaturesVer)
-		if err != nil {
-			return nil, nil, err
-		}
-		if res < 0 {
-			return nil, nil, fmt.Errorf("cannot use the AppArmor kernel features directory: snapd %s from the target system does not support it", targetSnapd.version)
-		}
-	}
-
 	stolenCleanup := cleanup
 	cleanup = func() {}
 	return targetSnapd, stolenCleanup, nil
@@ -774,9 +766,8 @@ func createPreseedArtifact(opts *preseedCoreOptions) (digest []byte, err error) 
 
 // runPreseedMode runs snapd in a preseed mode. It assumes running in a chroot.
 // The chroot is expected to be set-up and ready to use (critical system directories mounted).
-// aaFeaturesDir is the path inside the chroot of the AppArmor kernel features
-// of the target kernel, or "" if not provided.
-func runPreseedMode(preseedChroot string, targetSnapd *targetSnapdInfo, hybrid bool, aaFeaturesDir string) error {
+// extraEnv is added to the environment of snapd.
+func runPreseedMode(preseedChroot string, targetSnapd *targetSnapdInfo, hybrid bool, extraEnv []string) error {
 	// run snapd in preseed mode
 	cmd := exec.Command(targetSnapd.path)
 	cmd.Env = os.Environ()
@@ -784,9 +775,7 @@ func runPreseedMode(preseedChroot string, targetSnapd *targetSnapdInfo, hybrid b
 	if hybrid {
 		cmd.Env = append(cmd.Env, "SNAPD_PRESEED_HYBRID=1")
 	}
-	if aaFeaturesDir != "" {
-		cmd.Env = append(cmd.Env, snapdenv.EnvPreseedAppArmorFeaturesDir+"="+aaFeaturesDir)
-	}
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stderr = Stderr
 	cmd.Stdout = Stdout
 
@@ -867,13 +856,22 @@ func classicLikePreseed(chrootDir, label string, opts *ClassicOptions) error {
 		return err
 	}
 
-	var aaFeaturesDir string
+	var aaFeaturesDir, seccompActionsFile string
 	if opts != nil {
 		aaFeaturesDir = opts.AppArmorKernelFeaturesDir
+		seccompActionsFile = opts.SeccompActionsFile
 	}
 
 	if err := checkChroot(chrootDir, aaFeaturesDir); err != nil {
 		return fmt.Errorf("chroot verification failed: %w", err)
+	}
+
+	var seccompActions string
+	if seccompActionsFile != "" {
+		seccompActions, err = readSeccompActions(seccompActionsFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	// XXX: if prepareClassicChroot & runPreseedMode were refactored to
@@ -888,13 +886,47 @@ func classicLikePreseed(chrootDir, label string, opts *ClassicOptions) error {
 	}
 	defer cleanup()
 
+	// the snapd to run must be new enough to receive the target kernel
+	// features via the environment
+	var env []string
+	if aaFeaturesDir != "" {
+		res, err := strutil.VersionCompare(targetSnapd.version, snapdPreseedAppArmorFeaturesVer)
+		if err != nil {
+			return err
+		}
+		if res < 0 {
+			return fmt.Errorf("cannot use the AppArmor kernel features directory: snapd %s from the target system does not support it", targetSnapd.version)
+		}
+		env = append(env, snapdenv.EnvPreseedAppArmorFeaturesDir+"="+chrootAppArmorFeaturesDir)
+	}
+	if seccompActions != "" {
+		res, err := strutil.VersionCompare(targetSnapd.version, snapdPreseedSeccompActionsVer)
+		if err != nil {
+			return err
+		}
+		if res < 0 {
+			return fmt.Errorf("cannot use the seccomp actions file: snapd %s from the target system does not support it", targetSnapd.version)
+		}
+		env = append(env, snapdenv.EnvPreseedSeccompActions+"="+seccompActions)
+	}
+
 	// executing inside the chroot
 	hybrid := label != ""
-	var chrootAaFeaturesDir string
-	if aaFeaturesDir != "" {
-		chrootAaFeaturesDir = chrootAppArmorFeaturesDir
+	return runPreseedMode(chrootDir, targetSnapd, hybrid, env)
+}
+
+// readSeccompActions reads the seccomp actions available in the target kernel
+// from a file in the format of /proc/sys/kernel/seccomp/actions_avail.
+func readSeccompActions(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot read seccomp actions file: %v", err)
 	}
-	return runPreseedMode(chrootDir, targetSnapd, hybrid, chrootAaFeaturesDir)
+	actions := strings.Fields(string(data))
+	if len(actions) == 0 {
+		return "", fmt.Errorf("cannot use seccomp actions file %q: no actions listed", path)
+	}
+	return strings.Join(actions, " "), nil
 }
 
 // Classic runs preseeding of a classic ubuntu system pointed by chrootDir.
