@@ -237,6 +237,167 @@ func (s *preseedSuite) TestRunPreseedHybridHappy(c *C) {
 	c.Check(mockUmountCmd.Calls()[2], DeepEquals, []string{"umount", filepath.Join(tmpDir, "/proc")})
 }
 
+const chrootAppArmorFeaturesDir = "/tmp/snapd-preseed-apparmor-features"
+
+// mockAppArmorFeaturesDir creates the AppArmor kernel features directory of
+// a target kernel.
+func mockAppArmorFeaturesDir(c *C) string {
+	aaFeaturesDir := filepath.Join(c.MkDir(), "aa-features")
+	c.Assert(os.MkdirAll(filepath.Join(aaFeaturesDir, "policy", "versions"), 0755), IsNil)
+	c.Assert(os.WriteFile(filepath.Join(aaFeaturesDir, "policy", "versions", "v8"), []byte("yes\n"), 0444), IsNil)
+	return aaFeaturesDir
+}
+
+// mockChrootDirsNoSecurityfs is like mockChrootDirs, but without securityfs
+// mounted inside the chroot.
+func mockChrootDirsNoSecurityfs(rootDir string) func() {
+	mockMountInfo := `912 920 0:57 / ${rootDir}/proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+915 920 0:58 / ${rootDir}/dev rw,relatime - tmpfs none rw,size=492k,mode=755,uid=100000,gid=100000
+`
+	return osutil.MockMountInfo(strings.Replace(mockMountInfo, "${rootDir}", rootDir, -1))
+}
+
+func (s *preseedSuite) testRunPreseedAppArmorFeaturesHappy(c *C, label string) {
+	tmpDir := c.MkDir()
+	dirs.SetRootDir(tmpDir)
+	// no securityfs needed inside the chroot
+	defer mockChrootDirsNoSecurityfs(tmpDir)()
+
+	restoreSyscallChroot := preseed.MockSyscallChroot(func(path string) error { return nil })
+	defer restoreSyscallChroot()
+
+	mockMountCmd := testutil.MockCommand(c, "mount", "")
+	defer mockMountCmd.Restore()
+
+	mockUmountCmd := testutil.MockCommand(c, "umount", "")
+	defer mockUmountCmd.Restore()
+
+	targetSnapdRoot := filepath.Join(tmpDir, "target-core-mounted-here")
+	restoreMountPath := preseed.MockSnapdMountPath(targetSnapdRoot)
+	defer restoreMountPath()
+
+	restoreSystemSnapFromSeed := preseed.MockSystemSnapFromSeed(func(string, string) (string, string, error) { return "/a/core.snap", "", nil })
+	defer restoreSystemSnapFromSeed()
+
+	// note, the copy is checked under tmpDir as we're not really chrooting
+	mockTargetSnapd := testutil.MockCommand(c, filepath.Join(targetSnapdRoot, "usr/lib/snapd/snapd"), fmt.Sprintf(`#!/bin/sh
+	set -eu
+	[ "${SNAPD_PRESEED}" = "1" ]
+	[ "${SNAPD_PRESEED_APPARMOR_FEATURES_DIR}" = "%[2]s" ]
+	[ "$(cat %[1]s%[2]s/policy/versions/v8)" = "yes" ]
+`, tmpDir, chrootAppArmorFeaturesDir))
+	defer mockTargetSnapd.Restore()
+
+	// the snapd from the snap is new enough to support the AppArmor
+	// features directory
+	mockVersionFiles(c, targetSnapdRoot, "2.79", tmpDir, "2.41.0")
+
+	// a stale copy from an interrupted run is replaced
+	c.Assert(os.MkdirAll(filepath.Join(tmpDir, chrootAppArmorFeaturesDir, "stale"), 0755), IsNil)
+
+	opts := &preseed.ClassicOptions{AppArmorKernelFeaturesDir: mockAppArmorFeaturesDir(c)}
+	if label == "" {
+		c.Check(preseed.Classic(tmpDir, opts), IsNil)
+	} else {
+		c.Check(preseed.Hybrid(tmpDir, label, opts), IsNil)
+	}
+
+	c.Assert(mockTargetSnapd.Calls(), HasLen, 1)
+	// no mounts besides the ones done without the AppArmor features
+	// directory
+	c.Check(mockMountCmd.Calls(), HasLen, 3)
+	c.Check(mockUmountCmd.Calls(), HasLen, 3)
+	// the copy was removed
+	c.Check(filepath.Join(tmpDir, chrootAppArmorFeaturesDir), testutil.FileAbsent)
+}
+
+func (s *preseedSuite) TestRunPreseedAppArmorFeaturesHappy(c *C) {
+	s.testRunPreseedAppArmorFeaturesHappy(c, "")
+}
+
+func (s *preseedSuite) TestRunPreseedHybridAppArmorFeaturesHappy(c *C) {
+	s.testRunPreseedAppArmorFeaturesHappy(c, "system-label")
+}
+
+func (s *preseedSuite) TestRunPreseedAppArmorFeaturesUnsupportedSnapd(c *C) {
+	tmpDir := c.MkDir()
+	dirs.SetRootDir(tmpDir)
+	defer mockChrootDirsNoSecurityfs(tmpDir)()
+
+	restoreSyscallChroot := preseed.MockSyscallChroot(func(path string) error { return nil })
+	defer restoreSyscallChroot()
+
+	mockMountCmd := testutil.MockCommand(c, "mount", "")
+	defer mockMountCmd.Restore()
+
+	mockUmountCmd := testutil.MockCommand(c, "umount", "")
+	defer mockUmountCmd.Restore()
+
+	targetSnapdRoot := filepath.Join(tmpDir, "target-core-mounted-here")
+	restoreMountPath := preseed.MockSnapdMountPath(targetSnapdRoot)
+	defer restoreMountPath()
+
+	restoreSystemSnapFromSeed := preseed.MockSystemSnapFromSeed(func(string, string) (string, string, error) { return "/a/core.snap", "", nil })
+	defer restoreSystemSnapFromSeed()
+
+	mockTargetSnapd := testutil.MockCommand(c, filepath.Join(targetSnapdRoot, "usr/lib/snapd/snapd"), "")
+	defer mockTargetSnapd.Restore()
+
+	// neither snapd is new enough to support the AppArmor features
+	// directory
+	mockVersionFiles(c, targetSnapdRoot, "2.44.0", tmpDir, "2.41.0")
+
+	opts := &preseed.ClassicOptions{AppArmorKernelFeaturesDir: mockAppArmorFeaturesDir(c)}
+	c.Check(preseed.Classic(tmpDir, opts), ErrorMatches,
+		`cannot prepare chroot: cannot use the AppArmor kernel features directory: snapd 2.44.0 from the target system does not support it`)
+
+	c.Check(mockTargetSnapd.Calls(), HasLen, 0)
+	// everything was cleaned up
+	c.Check(mockUmountCmd.Calls(), HasLen, 3)
+	c.Check(filepath.Join(tmpDir, chrootAppArmorFeaturesDir), testutil.FileAbsent)
+}
+
+func (s *preseedSuite) TestRunPreseedAppArmorFeaturesCopyError(c *C) {
+	tmpDir := c.MkDir()
+	defer mockChrootDirsNoSecurityfs(tmpDir)()
+
+	restoreSyscallChroot := preseed.MockSyscallChroot(func(path string) error {
+		c.Fatalf("unexpected chroot")
+		return nil
+	})
+	defer restoreSyscallChroot()
+
+	opts := &preseed.ClassicOptions{AppArmorKernelFeaturesDir: filepath.Join(tmpDir, "missing")}
+	c.Check(preseed.Classic(tmpDir, opts), ErrorMatches,
+		`cannot prepare chroot: cannot copy AppArmor kernel features directory ".*/missing": .*`)
+	// no partially copied directory remains in the image
+	c.Check(filepath.Join(tmpDir, chrootAppArmorFeaturesDir), testutil.FileAbsent)
+}
+
+func (s *preseedSuite) TestRunPreseedAppArmorFeaturesChrootFailure(c *C) {
+	tmpDir := c.MkDir()
+	defer mockChrootDirsNoSecurityfs(tmpDir)()
+
+	restoreSyscallChroot := preseed.MockSyscallChroot(func(path string) error {
+		// the copy is in place by the time of chrooting
+		c.Check(filepath.Join(path, chrootAppArmorFeaturesDir, "policy/versions/v8"), testutil.FilePresent)
+		return fmt.Errorf("FAIL: %s", path)
+	})
+	defer restoreSyscallChroot()
+
+	opts := &preseed.ClassicOptions{AppArmorKernelFeaturesDir: mockAppArmorFeaturesDir(c)}
+	c.Check(preseed.Classic(tmpDir, opts), ErrorMatches, fmt.Sprintf("cannot prepare chroot: cannot chroot into %s: FAIL: %s", tmpDir, tmpDir))
+	c.Check(filepath.Join(tmpDir, chrootAppArmorFeaturesDir), testutil.FileAbsent)
+}
+
+func (s *preseedSuite) TestChrootValidationNoSecurityfsWithoutAppArmorFeatures(c *C) {
+	tmpDir := c.MkDir()
+	defer mockChrootDirsNoSecurityfs(tmpDir)()
+
+	c.Check(preseed.Classic(tmpDir, &preseed.ClassicOptions{}), ErrorMatches,
+		"chroot verification failed: cannot preseed without the following mountpoints:\n - .*/sys/kernel/security")
+}
+
 func (s *preseedSuite) TestRunPreseedHappyPremounted(c *C) {
 	tmpDir := c.MkDir()
 	dirs.SetRootDir(tmpDir)
