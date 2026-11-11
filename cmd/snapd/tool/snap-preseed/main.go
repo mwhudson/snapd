@@ -126,7 +126,9 @@ func run(parser *flags.Parser, args []string) (err error) {
 		return fmt.Errorf("cannot use --system-label without --hybrid")
 	}
 
-	classicOpts := &preseed.ClassicOptions{}
+	classicOpts := &preseed.ClassicOptions{
+		AppArmorKernelFeaturesDir: opts.AppArmorFeaturesDir,
+	}
 
 	if opts.Hybrid {
 		if opts.SystemLabel == "" {

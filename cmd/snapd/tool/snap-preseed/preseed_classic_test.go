@@ -107,6 +107,26 @@ func (s *startPreseedSuite) TestRunPreseedClassicHappy(c *C) {
 	c.Check(called, Equals, true)
 }
 
+func (s *startPreseedSuite) TestRunPreseedClassicAppArmorFeaturesDir(c *C) {
+	restore := snap_preseed.MockOsGetuid(func() int {
+		return 0
+	})
+	defer restore()
+
+	var called bool
+	restorePreseed := snap_preseed.MockPreseedClassic(func(dir string, opts *preseed.ClassicOptions) error {
+		c.Check(dir, Equals, "/a/dir")
+		c.Check(opts, DeepEquals, &preseed.ClassicOptions{AppArmorKernelFeaturesDir: "/aa-features"})
+		called = true
+		return nil
+	})
+	defer restorePreseed()
+
+	parser := testParser(c)
+	c.Assert(snap_preseed.Run(parser, []string{"--apparmor-features-dir", "/aa-features", "/a/dir"}), IsNil)
+	c.Check(called, Equals, true)
+}
+
 func (s *startPreseedSuite) TestResetReexeced(c *C) {
 	restore := snap_preseed.MockOsGetuid(func() int {
 		return 0
@@ -153,13 +173,13 @@ func (s *startPreseedSuite) TestHybridHappy(c *C) {
 	snap_preseed.MockPreseedHybrid(func(dir, label string, opts *preseed.ClassicOptions) error {
 		c.Check(dir, Equals, "/a/dir")
 		c.Check(label, Equals, "system-label")
-		c.Check(opts, DeepEquals, &preseed.ClassicOptions{})
+		c.Check(opts, DeepEquals, &preseed.ClassicOptions{AppArmorKernelFeaturesDir: "/aa-features"})
 		called = true
 		return nil
 	})
 
 	parser := testParser(c)
-	c.Assert(snap_preseed.Run(parser, []string{"--hybrid", "--system-label", "system-label", "/a/dir"}), IsNil)
+	c.Assert(snap_preseed.Run(parser, []string{"--hybrid", "--system-label", "system-label", "--apparmor-features-dir", "/aa-features", "/a/dir"}), IsNil)
 	c.Check(called, Equals, true)
 }
 
