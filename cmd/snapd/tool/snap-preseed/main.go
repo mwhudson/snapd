@@ -23,6 +23,7 @@
 package snap_preseed
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -88,6 +89,8 @@ func probeCore20ImageDir(dir string) bool {
 	return isDir
 }
 
+var errSysfsOverlayClassic = errors.New("cannot use --sysfs-overlay with classic or hybrid systems")
+
 // Run executes the snap-preseed logic with the given parser and args.
 func run(parser *flags.Parser, args []string) (err error) {
 	// real validation of plugs and slots; needs to be set
@@ -134,6 +137,9 @@ func run(parser *flags.Parser, args []string) (err error) {
 		if opts.SystemLabel == "" {
 			return fmt.Errorf("cannot use --hybrid without --system-label")
 		}
+		if opts.SysfsOverlay != "" {
+			return errSysfsOverlayClassic
+		}
 		if opts.Reset {
 			return preseedHybridReset(chrootDir, opts.SystemLabel)
 		}
@@ -152,6 +158,9 @@ func run(parser *flags.Parser, args []string) (err error) {
 			SysfsOverlay:              opts.SysfsOverlay,
 		}
 		return preseedCore20(coreOpts)
+	}
+	if opts.SysfsOverlay != "" {
+		return errSysfsOverlayClassic
 	}
 	if opts.ResetChroot {
 		return preseedResetPreseededChroot(chrootDir)
